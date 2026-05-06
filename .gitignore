@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+/target-agent/
+
+# Rust/Cargo local metadata
+/.cargo/
+
+# IDE/editor noise
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Simulator generated outputs
+*.log
+*.trace
+*.trace.gz
+*.json.gz
+
+# Local level/object dumps and debug exports
+*_ticks.log
+*_blocks.txt
+*_trace.json
+*_trace.json.gz
+

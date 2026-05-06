@@ -1,0 +1,14 @@
+﻿cargo :    Compiling gd-real-sim v0.1.0 (C:\Users\seanl\Documents\Coding\nefwolder\gd-real-sim)
+At C:\Users\seanl\AppData\Local\Temp\ps-script-8fdc2dfb-a060-48fb-a20b-5a4fe9cd972b.ps1:85 char:1
++ cargo run --release --bin gd-real-sim -- --save ../CCLocalLevels.dat  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling gd...er\gd-real-sim):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `release` profile [optimized] target(s) in 6.28s
+     Running `target-agent\release\gd-real-sim.exe --save ../CCLocalLevels.dat --level vierre --levelstring`
+error: a value is required for '--levelstring <LEVELSTRING>' but none was supplied
+
+For more information, try '--help'.
+error: process didn't exit successfully: `target-agent\release\gd-real-sim.exe --save ../CCLocalLevels.dat --level 
+vierre --levelstring` (exit code: 2)
