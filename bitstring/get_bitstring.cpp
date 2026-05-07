@@ -50,6 +50,8 @@ constexpr int    DEFAULT_HZ              = 240;
 constexpr int    DEFAULT_DURATION_S      = 60;
 constexpr int    VK_SPACE_KEY            = 0x20;
 constexpr int    VK_ESCAPE_KEY           = 0x1B;
+constexpr auto   SLEEP_GUARD             = std::chrono::microseconds(800);
+constexpr auto   YIELD_THRESHOLD         = std::chrono::microseconds(200);
 
 // "Normal" per-tick x delta band, in world units, at 240Hz.
 // 1x speed in GD is ~5.77 vx and dt = 1/4 frame = 0.25 substep, so per-tick
@@ -61,14 +63,15 @@ constexpr double DEFAULT_MAX_STEP        = 7.0;
 
 // Trigger upper bound on x. As soon as we see a finite x below this AND a
 // dx in [min_step, max_step], we know the level is running and we're still
-// near the start. We then back-compute how many ticks "x = 0" was based on
-// the observed dx, and pad that many 0-bits in front so sample 0 of the
-// output still aligns with tick 0 (player at origin, no input).
+// near the start. We then back-compute how many ticks "x = FIRST_TICK_X" was
+// based on the observed dx, and pad that many 0-bits in front so sample 0 of
+// the output still aligns with tick 0.
 //
 // Default = 500px. Way bigger than any realistic startup latency between
 // "level started moving" and "we caught the first tick", but way smaller
 // than the typical level length, so post-restart catches still work.
 constexpr double DEFAULT_X_TRIGGER_MAX   = 500.0;
+constexpr double FIRST_TICK_X            = -1.0;
 
 // Hard cap on how many leading 0-bits we'll synthesize from x/dx, just in
 // case dx is unstable on the trigger frame. 5s worth at 240Hz = 1200 ticks.
@@ -104,11 +107,11 @@ void print_usage(const char* exe) {
         << "  --duration <seconds>   Recording length (default 60)\n"
         << "  --hz <int>             Sample rate in Hz (default 240)\n"
         << "  --x-addr <hex>         Direct x-coord address (skip pointer chain)\n"
-        << "  --y-addr <hex>         Direct y-coord address (paired with --x-addr)\n"
+        << "  --y-addr <hex>         Optional direct y-coord address (accepted for compatibility)\n"
         << "  --x-trigger-max <float> Max x at trigger frame (default 500). Trigger fires\n"
         << "                          on the first tick where x < this AND dx is in band;\n"
-        << "                          (round(x/dx)) leading 0-bits are prepended so sample 0\n"
-        << "                          aligns with tick 0 of the level.\n"
+        << "                          (round((x-(-1))/dx)) leading 0-bits are prepended so\n"
+        << "                          sample 0 aligns with tick 0 at x = -1.\n"
         << "  --min-step <float>     Min per-tick dx that arms trigger (default 0.5)\n"
         << "  --max-step <float>     Max per-tick dx that counts as a normal step (default 7.0)\n"
         << "\n"
@@ -202,6 +205,8 @@ int main(int argc, const char* argv[]) {
     int         duration_s      = DEFAULT_DURATION_S;
     uint64_t    x_addr          = 0;
     uint64_t    y_addr          = 0;
+    bool        has_x_addr      = false;
+    bool        has_y_addr      = false;
     bool        use_direct_xy   = false;
     double      x_trigger_max   = DEFAULT_X_TRIGGER_MAX;
     double      min_step        = DEFAULT_MIN_STEP;
@@ -218,8 +223,8 @@ int main(int argc, const char* argv[]) {
         };
         if (flag == "--duration")            { if (!parse_int(need_value("--duration"), duration_s) || duration_s <= 0) { std::cerr << "Invalid --duration\n"; return 1; } }
         else if (flag == "--hz")             { if (!parse_int(need_value("--hz"), hz) || hz <= 0)              { std::cerr << "Invalid --hz\n"; return 1; } }
-        else if (flag == "--x-addr")         { if (!parse_u64(need_value("--x-addr"), x_addr))                 { std::cerr << "Invalid --x-addr\n"; return 1; } use_direct_xy = true; }
-        else if (flag == "--y-addr")         { if (!parse_u64(need_value("--y-addr"), y_addr))                 { std::cerr << "Invalid --y-addr\n"; return 1; } use_direct_xy = true; }
+        else if (flag == "--x-addr")         { if (!parse_u64(need_value("--x-addr"), x_addr))                 { std::cerr << "Invalid --x-addr\n"; return 1; } has_x_addr = true; use_direct_xy = true; }
+        else if (flag == "--y-addr")         { if (!parse_u64(need_value("--y-addr"), y_addr))                 { std::cerr << "Invalid --y-addr\n"; return 1; } has_y_addr = true; use_direct_xy = true; }
         else if (flag == "--x-trigger-max")  { if (!parse_double(need_value("--x-trigger-max"), x_trigger_max) || x_trigger_max <= 0) { std::cerr << "Invalid --x-trigger-max\n"; return 1; } }
         else if (flag == "--min-step")       { if (!parse_double(need_value("--min-step"), min_step))          { std::cerr << "Invalid --min-step\n"; return 1; } }
         else if (flag == "--max-step")       { if (!parse_double(need_value("--max-step"), max_step))          { std::cerr << "Invalid --max-step\n"; return 1; } }
@@ -230,8 +235,8 @@ int main(int argc, const char* argv[]) {
             return 1;
         }
     }
-    if (use_direct_xy && (x_addr == 0 || y_addr == 0)) {
-        std::cerr << "When using direct mode, both --x-addr and --y-addr are required.\n";
+    if (use_direct_xy && !has_x_addr) {
+        std::cerr << "Direct mode requires --x-addr.\n";
         return 1;
     }
 
@@ -239,9 +244,11 @@ int main(int argc, const char* argv[]) {
         std::cerr << "Warning: could not install Ctrl+C handler.\n";
     }
 
-    // High-resolution sleep + boost priority so we don't drift at 240Hz.
+    // High-resolution sleep + boosted process/thread priority to reduce
+    // scheduler jitter at 240Hz.
     timeBeginPeriod(1);
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
     HackIH gd;
     if (!gd.bind("GeometryDash.exe")) {
@@ -254,18 +261,33 @@ int main(int argc, const char* argv[]) {
     std::cout << "Output: " << out_path << "  (" << hz << "Hz x " << duration_s << "s = "
               << static_cast<int64_t>(hz) * duration_s << " samples)\n";
     if (use_direct_xy) {
-        std::cout << "Direct XY mode: x=0x" << std::hex << x_addr
-                  << " y=0x" << y_addr << std::dec << "\n";
+        std::cout << "Direct X mode: x=0x" << std::hex << x_addr;
+        if (has_y_addr) {
+            std::cout << " (y=0x" << y_addr << " ignored)";
+        }
+        std::cout << std::dec << "\n";
     } else {
         std::cout << "Pointer-chain XY mode (offsets 0x67C / 0x680).\n";
     }
     std::cout << "Trigger: first tick with x < " << x_trigger_max
               << " AND dx in [" << min_step << ", " << max_step << "] px/tick.\n"
-              << "  Leading 0-bits will be synthesized so sample 0 == tick 0 (player at origin).\n";
+              << "  Leading 0-bits will be synthesized so sample 0 == tick 0 at x = "
+              << FIRST_TICK_X << ".\n";
     std::cout << "Start the level - capture begins on the first 240Hz tick where the player moves.\n";
 
     using clock = std::chrono::steady_clock;
-    const auto step_ns = std::chrono::nanoseconds(1'000'000'000LL / hz);
+    constexpr int64_t NS_PER_SEC = 1'000'000'000LL;
+    const auto tick_offset = [hz](int64_t tick_index) -> std::chrono::nanoseconds {
+        // Use absolute rational-time mapping instead of fixed integer step_ns so
+        // rates like 240Hz stay phase-accurate over long captures.
+        const long double ns =
+            (static_cast<long double>(tick_index) * static_cast<long double>(NS_PER_SEC)) /
+            static_cast<long double>(hz);
+        return std::chrono::nanoseconds(static_cast<int64_t>(std::floor(ns)));
+    };
+    const auto tick_time = [&tick_offset](clock::time_point base, int64_t tick_index) -> clock::time_point {
+        return base + tick_offset(tick_index);
+    };
 
     // -------- Phase 1: catch the first in-band forward step near x=0. --------
     //
@@ -277,19 +299,21 @@ int main(int argc, const char* argv[]) {
     // x < x_trigger_max check just rejects late starts deep inside a level.
     //
     // Whatever x we observe at the trigger tick, we back-compute how many
-    // ticks earlier x was 0 using the observed dx, and prepend that many
+    // ticks earlier x was FIRST_TICK_X using the observed dx, and prepend that many
     // 0-bits ("not clicking") so sample 0 of the .bin still aligns with
-    // tick 0 (player at the level origin).
+    // tick 0.
     float  last_x       = 0.0f;
     bool   has_last_x   = false;
     double trigger_x    = 0.0;
     double trigger_dx   = 0.0;
 
-    auto next_tick = clock::now();
+    const auto phase1_base = clock::now();
+    int64_t probe_tick = 0;
     bool triggered = false;
     while (g_running && !triggered) {
-        next_tick += step_ns;
-        std::this_thread::sleep_until(next_tick);
+        ++probe_tick;
+        const auto scheduled_probe = tick_time(phase1_base, probe_tick);
+        std::this_thread::sleep_until(scheduled_probe);
 
         const float x = read_coord(gd, use_direct_xy, x_addr, OFF_X);
         if (!std::isfinite(x)) {
@@ -321,17 +345,18 @@ int main(int argc, const char* argv[]) {
         return 1;
     }
 
-    // How many ticks ago was x = 0? At the trigger tick the player is at
-    // trigger_x and moving trigger_dx px/tick, so x=0 was ~trigger_x/trigger_dx
-    // ticks before *this* tick. Clamp to [0, MAX_PAD_TICKS] for safety.
-    int pad_ticks = static_cast<int>(std::lround(trigger_x / trigger_dx));
+    // How many ticks ago was x = FIRST_TICK_X? At the trigger tick the player is at
+    // trigger_x and moving trigger_dx px/tick, so x=FIRST_TICK_X was approximately
+    // (trigger_x - FIRST_TICK_X) / trigger_dx ticks before this tick. Clamp to
+    // [0, MAX_PAD_TICKS] for safety.
+    int pad_ticks = static_cast<int>(std::lround((trigger_x - FIRST_TICK_X) / trigger_dx));
     if (pad_ticks < 0)               pad_ticks = 0;
     if (pad_ticks > MAX_PAD_TICKS)   pad_ticks = MAX_PAD_TICKS;
 
     std::cout << "\n=== CAPTURE STARTED ===\n"
               << "Triggered: x=" << trigger_x << " dx=" << trigger_dx << " px/tick.\n"
               << "Synthesizing " << pad_ticks
-              << " leading 0-bit ticks so sample 0 == tick 0 (x=0).\n"
+              << " leading 0-bit ticks so sample 0 == tick 0 (x=" << FIRST_TICK_X << ").\n"
               << "Recording at " << hz << "Hz for up to " << duration_s
               << "s (" << static_cast<int64_t>(hz) * duration_s << " samples).\n"
               << "Press ESC at any time to stop and save.\n"
@@ -345,6 +370,7 @@ int main(int argc, const char* argv[]) {
     int      last_bit     = 0;
     int64_t  max_late_ns  = 0;
     int64_t  missed_events = 0;
+    int64_t  missed_ticks_total = 0;
     bool     esc_stopped  = false;
 
     // Clear any stale ESC state so a key pressed before capture doesn't
@@ -353,12 +379,14 @@ int main(int argc, const char* argv[]) {
 
     const auto start_ns = clock::now();
     // The trigger tick *itself* is sample 0, so its scheduled time is the
-    // current `next_tick` (we just woke up on it above). Subsequent samples
-    // advance one step_ns at a time, identical to get_bitstring.py.
-    auto target = next_tick;
+    // current probe tick we just woke up on above. Subsequent samples advance
+    // by the exact hz rational schedule via tick_time().
+    const auto capture_base = phase1_base;
+    int64_t capture_tick = probe_tick;
+    auto target = tick_time(capture_base, capture_tick);
 
-    // Synthesize `pad_ticks` leading 0-bits so sample 0 == tick 0 (x=0,
-    // player at origin, not clicking). Cap at total_samples just in case.
+    // Synthesize `pad_ticks` leading 0-bits so sample 0 == tick 0 (x=FIRST_TICK_X,
+    // not clicking). Cap at total_samples just in case.
     for (int i = 0; i < pad_ticks && sample_index < total_samples; ++i) {
         bits.push(0);
         ++sample_index;
@@ -379,15 +407,20 @@ int main(int argc, const char* argv[]) {
             std::cout << "\nESC pressed - stopping capture and saving...\n";
             break;
         }
-        target += step_ns;
+        ++capture_tick;
+        target = tick_time(capture_base, capture_tick);
 
+        // Coarse sleep until shortly before the deadline, then yield/spin to
+        // reduce oversleep at sub-5ms cadence.
+        const auto sleep_until_tp = target - SLEEP_GUARD;
+        if (sleep_until_tp > clock::now()) {
+            std::this_thread::sleep_until(sleep_until_tp);
+        }
         for (;;) {
             const auto now = clock::now();
             const auto remaining = target - now;
             if (remaining <= std::chrono::nanoseconds::zero()) break;
-            if (remaining > std::chrono::milliseconds(2)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            } else if (remaining > std::chrono::microseconds(200)) {
+            if (remaining > YIELD_THRESHOLD) {
                 std::this_thread::yield();
             } else {
                 // spin
@@ -400,10 +433,16 @@ int main(int argc, const char* argv[]) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(lateness).count();
         if (lateness_ns > max_late_ns) max_late_ns = lateness_ns;
 
-        const int64_t step_count = step_ns.count();
-        const int64_t missed = lateness_ns > 0 ? lateness_ns / step_count : 0;
+        int64_t missed = 0;
+        while (sample_index < total_samples) {
+            const auto next_target = tick_time(capture_base, capture_tick + 1);
+            if (next_target > now) break;
+            ++capture_tick;
+            ++missed;
+        }
         if (missed > 0) {
             ++missed_events;
+            missed_ticks_total += missed;
             for (int64_t i = 0; i < missed && sample_index < total_samples; ++i) {
                 bits.push(last_bit);
                 ++sample_index;
@@ -460,6 +499,7 @@ int main(int argc, const char* argv[]) {
     std::cout << "Elapsed:         " << std::fixed << elapsed << " s\n";
     std::cout << "Max lateness:    " << (max_late_ns / 1e6) << " ms\n";
     std::cout << "Missed events:   " << missed_events << "\n";
+    std::cout << "Missed ticks:    " << missed_ticks_total << "\n";
     std::cout << "Output:          " << out_path << "\n";
 
     return 0;

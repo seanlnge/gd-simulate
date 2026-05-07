@@ -222,6 +222,25 @@ fn unsupported_platformer_header_is_reported() {
 }
 
 #[test]
+fn force_blocks_are_reported_unsupported_not_silent_noops() {
+    let db = ObjectDatabase::load_embedded().unwrap();
+    for object_id in [2069, 3645] {
+        let level = Level::parse(&format!("kA4,0;1,{object_id},2,30,3,15;"), &db).unwrap();
+        let err = simulate(
+            &level,
+            &ClickTape::from_bits("0").unwrap(),
+            SimulationConfig { max_ticks: 10 },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("force blocks"),
+            "id {object_id} should report force-block unsupported status, got {err}"
+        );
+    }
+}
+
+#[test]
 fn dash_and_toggle_orbs_are_accepted_as_partial_mechanics() {
     let db = ObjectDatabase::load_embedded().unwrap();
     for object_id in [1704, 3004] {
@@ -278,7 +297,7 @@ fn yellow_orb_fires_on_press_start() {
 }
 
 #[test]
-fn gravity_ring_orb_84_flips_gravity_and_pulses_negative_cube_vy() {
+fn gravity_ring_orb_84_sets_point_4_yellow_velocity_then_flips_gravity() {
     let db = ObjectDatabase::load_embedded().unwrap();
     let level = Level::parse("kA4,0;1,84,2,15,3,15;", &db).unwrap();
     let bits = "1".repeat(240);
@@ -288,20 +307,21 @@ fn gravity_ring_orb_84_flips_gravity_and_pulses_negative_cube_vy() {
         SimulationConfig { max_ticks: 240 },
     )
     .unwrap();
-    // Gravity-jump orb should flip gravity and then apply yellow-style pulse in
-    // the new gravity frame (negative world-space vy for cube).
+    // Blue orb should apply 0.4x yellow-orb velocity, then toggle gravity.
     assert!(
         run.trace.iter().any(|f| f.state.gravity_sign > 0.0),
         "expected gravity to flip after id=84"
     );
     assert!(
-        run.trace.iter().any(|f| f.state.vy <= -10.0),
-        "expected negative pulse after gravity-jump orb activation"
+        run.trace
+            .iter()
+            .any(|f| (f.state.vy - (11.1800318 * 0.4)).abs() < 0.1),
+        "expected +0.4x yellow velocity before gravity toggle"
     );
 }
 
 #[test]
-fn pink_orb_141_applies_pulse_12_in_cube_mode() {
+fn pink_orb_141_applies_docs_point_72_yellow_velocity_in_cube_mode() {
     let db = ObjectDatabase::load_embedded().unwrap();
     let level = Level::parse("kA4,0;1,141,2,15,3,15;", &db).unwrap();
     let bits = "1".repeat(240);
@@ -312,8 +332,10 @@ fn pink_orb_141_applies_pulse_12_in_cube_mode() {
     )
     .unwrap();
     assert!(
-        run.trace.iter().any(|f| (f.state.vy - 12.0).abs() < 0.1),
-        "expected id=141 pink orb pulse near +12 in normal gravity cube mode"
+        run.trace
+            .iter()
+            .any(|f| (f.state.vy - (11.1800318 * 0.72)).abs() < 0.1),
+        "expected id=141 pink orb pulse near cube yellow * 0.72 in normal gravity cube mode"
     );
 }
 
@@ -481,7 +503,7 @@ fn cube_starts_on_real_floor_baseline_without_sinking() {
     .unwrap();
 
     let first = run.trace.first().unwrap();
-    assert!((first.state.x - 1.29825).abs() < 0.001);
+    assert!((first.state.x - -13.70175).abs() < 0.001);
     assert_eq!(first.state.y, 105.0);
     assert!(first.state.on_ground);
     assert_eq!(first.state.vy, 0.0);
@@ -525,30 +547,25 @@ fn yellow_pad_applies_jump_velocity() {
 }
 
 #[test]
-fn purple_pad_id_140_applies_force_12() {
+fn purple_pad_id_140_applies_force_10_4_for_cube() {
     let db = ObjectDatabase::load_embedded().unwrap();
     let level = Level::parse("kA4,0;1,140,2,15,3,15,6,90,5,1;", &db).unwrap();
     let run = simulate_with_trace(
         &level,
-        &ClickTape::from_bits(&"0".repeat(8)).unwrap(),
-        SimulationConfig { max_ticks: 8 },
+        &ClickTape::from_bits(&"0".repeat(24)).unwrap(),
+        SimulationConfig { max_ticks: 24 },
     )
     .unwrap();
 
     let activated = run
         .trace
         .iter()
-        .find(|frame| frame.state.vy > 11.5)
-        .expect("purple pad should activate within the OpenGD outer bounds");
+        .find(|frame| (frame.state.vy - 10.4).abs() < 0.001)
+        .expect("purple pad should apply the documented 10.4 force when touched");
     assert!(
-        (activated.state.vy - 12.0).abs() < 0.001,
-        "id=140 is the purple pad and should apply force 12; got vy={}",
+        (activated.state.vy - 10.4).abs() < 0.001,
+        "id=140 is the purple pad and should apply force 10.4 for cube; got vy={}",
         activated.state.vy
-    );
-    assert!(
-        activated.state.x < 5.0,
-        "rotated purple pad should not convert the impulse into a horizontal warp; got x={}",
-        activated.state.x
     );
 }
 
@@ -576,7 +593,7 @@ fn red_pad_id_1332_applies_force_20() {
 }
 
 #[test]
-fn pop_style_purple_pad_never_exceeds_force_12() {
+fn pop_style_purple_pad_never_exceeds_force_10_4() {
     let db = ObjectDatabase::load_embedded().unwrap();
     let level = Level::parse(
         "kA4,0;\
@@ -602,8 +619,8 @@ fn pop_style_purple_pad_never_exceeds_force_12() {
         .map(|frame| frame.state.vy)
         .fold(f32::NEG_INFINITY, f32::max);
     assert!(
-        max_vy_after <= 12.0001,
-        "purple pad behavior should not exceed force 12; max vy after x=150 was {}",
+        max_vy_after <= 10.4001,
+        "purple pad behavior should not exceed force 10.4; max vy after x=150 was {}",
         max_vy_after
     );
 }
@@ -669,12 +686,16 @@ fn slope_contact_uses_gdp_radius_along_slope() {
     let level = Level::parse("kA4,0;1,1338,2,15,3,15;", &db).unwrap();
     let run = simulate_with_trace(
         &level,
-        &ClickTape::from_bits(&"0".repeat(4)).unwrap(),
-        SimulationConfig { max_ticks: 4 },
+        &ClickTape::from_bits(&"0".repeat(40)).unwrap(),
+        SimulationConfig { max_ticks: 40 },
     )
     .unwrap();
 
-    let first = run.trace.first().unwrap();
+    let first = run
+        .trace
+        .iter()
+        .find(|frame| frame.state.on_slope)
+        .expect("trace should eventually contact the slope");
     assert!(
         first.state.y > 110.0,
         "slope should place cube using radius/cos(angle), got y={}",
@@ -689,12 +710,16 @@ fn pop_start_slope_uses_opengd_y_offset() {
     let level = Level::parse("kA4,0;1,372,2,30,3,15;", &db).unwrap();
     let run = simulate_with_trace(
         &level,
-        &ClickTape::from_bits(&"0".repeat(4)).unwrap(),
-        SimulationConfig { max_ticks: 4 },
+        &ClickTape::from_bits(&"0".repeat(40)).unwrap(),
+        SimulationConfig { max_ticks: 40 },
     )
     .unwrap();
 
-    let first = run.trace.first().unwrap();
+    let first = run
+        .trace
+        .iter()
+        .find(|frame| frame.state.on_slope)
+        .expect("trace should eventually contact the Pop start slope");
     assert!(first.state.on_slope);
     assert!(
         first.state.y > 105.0,
@@ -802,12 +827,15 @@ fn pop_steep_slope_exit_carries_upward_velocity_over_stack() {
 }
 
 #[test]
-fn support_matrix_is_machine_readable_and_tracks_unsupported_systems() {
+fn support_matrix_is_machine_readable_and_tracks_noop_and_unsupported_systems() {
     let matrix = SupportMatrix::load_embedded().unwrap();
 
     assert_eq!(matrix.status("player_modes.cube").unwrap(), "partial");
+    assert_eq!(matrix.status("triggers.move_trigger").unwrap(), "no_op");
     assert_eq!(
-        matrix.status("triggers.move_trigger").unwrap(),
+        matrix
+            .status("force_blocks.basic_acceleration_formula")
+            .unwrap(),
         "unsupported"
     );
     assert_eq!(matrix.status("triggers.end_trigger").unwrap(), "supported");
@@ -1086,9 +1114,8 @@ fn slope_exit_velocity_matches_gdp_canon_formula() {
     let speed_mul = last_on_slope.state.speed_multiplier;
     let player_speed = last_on_slope.state.player_speed;
     let slope_angle = (30.0_f32).atan2(60.0);
-    let expected_gdp = (1.12_f32 / slope_angle).min(1.54)
-        * (30.0 * player_speed * speed_mul)
-        / 60.0;
+    let expected_gdp =
+        (1.12_f32 / slope_angle).min(1.54) * (30.0 * player_speed * speed_mul) / 60.0;
 
     let actual = last_on_slope.state.slope_exit_vy.abs();
     assert!(

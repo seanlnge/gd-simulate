@@ -1,5 +1,5 @@
 {
-  "policy": "No mechanic may be approximated silently. Unsupported mechanics raise UnsupportedFeature errors. Statuses: 'supported' = ported end-to-end, 'partial' = core behavior ported but missing secondary cases (documented below), 'unsupported' = refuses to simulate, 'no_op' = accepted silently because the mechanic has no gameplay effect in GD 2.2.",
+  "policy": "No mechanic may be approximated silently. Unsupported mechanics either raise `UnsupportedFeature` (hard-stop mechanics like platformer/force-blocks) or are accepted as explicit no-ops with warning (trigger families that mutate level state). Statuses: 'supported' = ported end-to-end, 'partial' = core behavior ported but missing secondary cases (documented below), 'unsupported' = refuses to simulate, 'no_op' = accepted as a documented no-op.",
   "object_model": {
     "object_json_defaults_from_gdclone": "supported",
     "raw_property_preservation": "supported",
@@ -61,34 +61,43 @@
     "spider_orb": "partial",
     "toggle_orb": "partial"
   },
+  "force_blocks": {
+    "basic_acceleration_formula": "unsupported",
+    "stacking": "unsupported",
+    "rotation": "unsupported",
+    "force_ids": "unsupported",
+    "range_relative_modes": "unsupported"
+  },
   "triggers": {
     "end_trigger": "supported",
     "color_trigger": "partial_visual_only",
     "alpha_trigger": "partial_visual_only",
     "pulse_trigger": "partial_visual_only",
     "shake_trigger": "partial_visual_only",
-    "move_trigger": "unsupported",
-    "rotate_trigger": "unsupported",
-    "follow_trigger": "unsupported",
-    "scale_trigger": "unsupported",
-    "spawn_trigger": "unsupported",
-    "toggle_trigger": "unsupported",
-    "collision_trigger": "unsupported",
-    "instant_collision_trigger": "unsupported",
-    "timewarp_trigger": "unsupported",
-    "gravity_trigger": "unsupported",
-    "stop_trigger": "unsupported",
-    "pickup_trigger": "unsupported"
+    "move_trigger": "no_op",
+    "rotate_trigger": "no_op",
+    "follow_trigger": "no_op",
+    "scale_trigger": "no_op",
+    "spawn_trigger": "no_op",
+    "toggle_trigger": "no_op",
+    "collision_trigger": "no_op",
+    "instant_collision_trigger": "no_op",
+    "timewarp_trigger": "no_op",
+    "gravity_trigger": "no_op",
+    "stop_trigger": "no_op",
+    "pickup_trigger": "no_op"
   },
   "partial_notes": {
     "object_model": "Box hitbox outer bounds now use OpenGD-style `_pHitboxes` semantics in both collision and visualizer rendering: local box corners are transformed with signed scale and engine rotation, then translated by object position + `(15,15)`. Pop-critical ids `207` and `468` are covered by explicit OpenGD fallback/transform regressions, including raw key `5` flipped placement. Overall transform status remains partial because slope-specific collision, circular scale behavior, and non-box decoration/special cases are still not fully OpenGD-verified.",
     "ship": "Ship core vertical physics now follows OpenGD `PlayerObject::updateJump`: hold/release acceleration uses `shipAccel`, falling-sensitive `extraBoost`, 0.9 vertical slow scaling, mini playerSize `0.85`, and OpenGD flyer lower/upper/flip clamps. Entering Ship halves carried `vy` and clears grounded state, and gravity portals halve `vy` only on actual flips via OpenGD `flipGravity` semantics. Still missing: full Ship collision survivability matrix, exact floor/ceiling rail offsets, Ship-specific orb/pad interaction verification, and visual `updateShipRotation` parity.",
-    "pads": "Pad activation uses OpenGD `GameObject::_pHitboxes` outer bounds for jump pads (e.g. purple pad 140 = `{5,25,-12.5,-2.5}`), while impulse direction follows vertical gravity-axis force and ignores object rotation/flip. Current cube pad forces: yellow 35 = 16, purple 140 = 12, red 1332 = 20; blue/gravity 67 flips gravity. Missing: exact adjacent-pad activation hysteresis and full per-mode secondary effects.",
+    "pads": "Pad activation uses OpenGD `GameObject::_pHitboxes` outer bounds for jump pads (e.g. purple pad 140 = `{5,25,-12.5,-2.5}`), while impulse direction follows vertical gravity-axis force and ignores object rotation/flip. Current cube pad forces follow GD Docs: yellow 35 = 16, purple 140 = 10.4, red 1332 = 20; blue/gravity 67 applies 6.4 then flips gravity. Ship/UFO yellow pads now latch the documented 8G next-tick follow-up. Missing: exact adjacent-pad activation hysteresis and full per-mode secondary effects.",
     "portals": "Mode/gravity/size/speed portals trigger on AABB intersection and apply to player state once per entry. Ship portal entry halves carried vertical velocity, and gravity portals halve vertical velocity on actual gravity flips, matching OpenGD `setGamemode(PlayerGamemodeShip)` and `flipGravity`. Teleport portals (747 blue -> nearest 749 orange) translate y only; gravity and velocity are preserved. Missing: sub-tick portal crossing accuracy, portal enter/exit hysteresis, speed portal vs mode portal priority, named-pair teleport triggers from 2.2 platformer editor.",
     "dual_portals": "Orange (286) spawns a partner player with inverted gravity_sign; blue (287) removes the partner. Partner shares input and is run through full physics/collision pipeline. 2-player split controls (kA10=1) remain unsupported.",
-    "orbs": "Impulse table from boomlings.dev/reference/player_physics/orbs_and_pads, applied on press_start while the player overlaps an orb. Uses y_start (cube jump velocity at current speed tier) as the base and per-mode multipliers from the GD Docs. Dash orb and toggle orb are accepted as partial mechanics for parity runs: dash currently preserves velocity without entering a dash state, and toggle is physics no-op. Ship yellow pad's second-tick re-decay to 8G, UFO black orb's continuous acceleration, and the full dash-orb/spider-orb/toggle-orb state machines are not yet modeled.",
-    "collisions": "Cube block contacts now split OpenGD player boxes: outer/light-red `30x30` for grounding and broad block contact, inner/blue `7.5x7.5` for lethal solid side/ceiling checks. Non-circular hazards use the outer/light-red player box, and circular hazards use OpenGD full player outer-bounds vs circle checks. Side-hit death is suppressed while slope contact is still being resolved, including GDP's 0.2s recent-slope window (`m_totalTime - m_slopeEndTime < 0.2`). Missing: exact rotated/dark-red cube hitbox from cube rotation state, moving platforms, breakables, platformer side walls, and full boolJ state.",
-    "slopes": "Axis-aligned slopes use `GameObject::slopeYPos` in world X plus GDP's player radius along slope (`playerRadius / cos(angle)`). Level object Y coordinates follow OpenGD `PlayLayer::loadLevel` (`key 3 + 90.0`), so Pop's raw start slope at y=15 is loaded at world y=105. Non-zero rotation (negated key `6`) uses gdclone's transformed triangular hypotenuse in world space, with `min(1.12/angle,1.54)` slope-exit velocity from gdp line 266 and recent-slope solid landing suppression. Axis-aligned slope exit includes `player_speed` on the grade path and now uses a GDP-style signed branch (`flipMod * (playerUphill ? -1 : 1)`) under static-slope assumptions (`slopeOutpaces=false`, non-sideways). Reverse gravity uses `floor_top` in `slope_yPos` for offset sign. Still missing: full `playerUphill` state parity (`m_slopeUphill`/`goingLeft` from engine object state), moving-slope outpace branch, ice, platformer-only trimming from gdp::collidedWithSlopeInternal."
+    "orbs": "Impulse table from boomlings.dev/reference/player_physics/orbs_and_pads, applied on press_start while the player overlaps an orb. Uses y_start (cube jump velocity at current speed tier) as the base and per-mode multipliers from the GD Docs. Pink orb now uses cube-yellow * 0.72 for cube/robot, blue gravity orb applies the documented 0.4 velocity before toggling gravity, robot red orb uses * 1.28, and green orb uses post-toggle-frame velocity semantics in this simulator. Dash orbs now implement a docs-minimal state: 2-held-tick gate, angle remap/clamp to [-70, 70], movement along that angle with displayed vy=0, and pink-dash swift-click vy*0.5 + gravity toggle. Toggle orb remains a physics no-op. Still missing: UFO black orb's continuous acceleration, and full engine-perfect dash/spider/toggle state machines.",
+    "collisions": "Cube block contacts now split GD Docs player boxes: outer/light-red `30x30` normal and `18x18` mini for grounding and broad block contact, inner/blue `9x9` normal and `10x10` mini for lethal solid side/ceiling checks. Non-circular hazards use the outer/light-red player box, and circular hazards use OpenGD full player outer-bounds vs circle checks. Side-hit death is suppressed while slope contact is still being resolved, including GDP's 0.2s recent-slope window (`m_totalTime - m_slopeEndTime < 0.2`). Missing: exact rotated/dark-red cube hitbox from cube rotation state, moving platforms, breakables, platformer side walls, and full boolJ state.",
+    "force_blocks": "The docs provide acceleration math, stacking, and rotation behavior, but do not identify object IDs or levelstring property keys. The embedded gdclone object database also has no force-block texture/default entries, so gd-real-sim marks force blocks unsupported rather than silently approximating unknown objects.",
+    "slopes": "Axis-aligned slopes use `GameObject::slopeYPos` in world X plus GDP's player radius along slope (`playerRadius / cos(angle)`). Level object Y coordinates follow OpenGD `PlayLayer::loadLevel` (`key 3 + 90.0`), so Pop's raw start slope at y=15 is loaded at world y=105. Non-zero rotation (negated key `6`) uses gdclone's transformed triangular hypotenuse in world space, with `min(1.12/angle,1.54)` slope-exit velocity from gdp line 266 and recent-slope solid landing suppression. Axis-aligned slope exit includes `player_speed` on the grade path and now uses a GDP-style signed branch (`flipMod * (playerUphill ? -1 : 1)`) under static-slope assumptions (`slopeOutpaces=false`, non-sideways). Reverse gravity uses `floor_top` in `slope_yPos` for offset sign. Still missing: full `playerUphill` state parity (`m_slopeUphill`/`goingLeft` from engine object state), moving-slope outpace branch, ice, platformer-only trimming from gdp::collidedWithSlopeInternal.",
+    "triggers": "Only end trigger is simulation-effective. Visual triggers listed as `partial_visual_only` are accepted and currently treated as non-physics visual no-ops by the simulator path. Other trigger families that mutate level state are accepted as explicit no-ops with warning (not hard errors) to keep replay simulation running on modern resaved levels."
   },
-  "implicit_bounds": "Invisible floor top at y=90 so a 30px cube rests at center y=105, matching captured Pop telemetry. There is no 300px gameplay ceiling in normal gravity; the upper bound is only an out-of-bounds guard."
+  "implicit_bounds": "Invisible floor top at y=90 so a 30px cube rests at center y=105, matching captured Pop telemetry. Global implicit ceiling death remains at y=2505 (suppressed for cube when overlapping H-square 1859). Ball mode can instead use an 8-block portal window band, where bounds clamp/ground behavior applies inside that window."
 }

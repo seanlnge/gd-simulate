@@ -117,11 +117,7 @@ fn read_sp240bin(path: &PathBuf, override_hz: Option<u32>) -> anyhow::Result<Str
         "note: resampling click tape from {source_hz} Hz to {SIM_HZ} Hz ({} source samples)",
         source_bits.len()
     );
-    Ok(resample_click_bits_linear(
-        &source_bits,
-        source_hz,
-        SIM_HZ,
-    ))
+    Ok(resample_click_bits_linear(&source_bits, source_hz, SIM_HZ))
 }
 
 fn resample_click_bits_linear(bits: &[u8], src_hz: u32, dst_hz: u32) -> String {
@@ -333,6 +329,15 @@ const SETTINGS_BTN_GAP: i32 = 4;
 const SETTINGS_BTN_BG_OFF: u32 = 0x2A3342;
 const SETTINGS_BTN_BG_ON: u32 = 0x32C950;
 const SETTINGS_BTN_BORDER: u32 = 0xF4F4FA;
+const SETTINGS_PANEL_BG: u32 = 0x1B1F2E;
+const SETTINGS_PANEL_WIDTH: i32 = 188;
+const SETTINGS_PANEL_ROW_H: i32 = 20;
+const SETTINGS_PANEL_ROW_GAP: i32 = 4;
+const SETTINGS_PANEL_PAD: i32 = 6;
+const HITBOX_MAIN_COLOR: u32 = CUBE_COLOR;
+const HITBOX_ROTATED_COLOR: u32 = 0x66CCFF;
+const HITBOX_CORE_COLOR: u32 = 0xFFAA44;
+const HITBOX_CURRENT_ALPHA: f32 = 0.90;
 const VIEW_HEIGHT_BLOCKS: f32 = 20.0;
 const BLOCK_SIZE: f32 = 30.0;
 /// Sim editor-style grid: lines every `BLOCK_SIZE` units, cell corner at this world point.
@@ -353,6 +358,11 @@ struct VizState {
     zoom: f32,
     show_clicks: bool,
     show_vy: bool,
+    show_main_hitbox: bool,
+    show_rotated_hitbox: bool,
+    show_core_hitbox: bool,
+    show_trail: bool,
+    show_settings_panel: bool,
     follow_cube: bool,
     current_tick: usize,
     scrubbing: bool,
@@ -443,7 +453,7 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
 
     eprintln!(
         "visualizer keys: Left/Right or A/D = scroll, +/- or wheel = zoom, \
-         C = toggle clicks bar, V = toggle vy bar, F = toggle follow-cube, \
+         F = toggle follow-cube, \
          Home/End = first/last tick, drag top bar = scrub time, \
          right-mouse drag = pan camera (X+Y), Esc = close"
     );
@@ -456,6 +466,11 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         zoom: 1.0,
         show_clicks: true,
         show_vy: true,
+        show_main_hitbox: true,
+        show_rotated_hitbox: false,
+        show_core_hitbox: false,
+        show_trail: true,
+        show_settings_panel: false,
         follow_cube: false,
         current_tick: trace.len() - 1,
         scrubbing: false,
@@ -476,8 +491,6 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         }
         for key in window.get_keys_pressed(KeyRepeat::No) {
             match key {
-                Key::C => state.show_clicks = !state.show_clicks,
-                Key::V => state.show_vy = !state.show_vy,
                 Key::F => state.follow_cube = !state.follow_cube,
                 Key::Equal | Key::NumPadPlus => {
                     state.zoom = (state.zoom * ZOOM_STEP).min(ZOOM_MAX);
@@ -533,23 +546,40 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         state.last_rmouse_down = rmouse_down;
 
         if let Some((mx, my)) = mouse_pos {
-            let in_scrubber = (my as usize) >= layout.scrubber_top
-                && (my as usize) < layout.scrubber_bottom;
-            let in_settings_buttons = my >= 4.0
-                && my < 4.0 + SETTINGS_BTN_SIZE as f32
-                && mx >= width as f32 - 4.0 - 2.0 * (SETTINGS_BTN_SIZE + SETTINGS_BTN_GAP) as f32;
-            if mouse_down && !state.last_mouse_down && in_settings_buttons {
-                // Click on settings buttons (top-right). Two buttons: C, V.
-                let btn_x_start =
-                    width as i32 - 4 - 2 * (SETTINGS_BTN_SIZE + SETTINGS_BTN_GAP);
-                let rel = mx as i32 - btn_x_start;
-                let idx = rel / (SETTINGS_BTN_SIZE + SETTINGS_BTN_GAP);
-                match idx {
-                    0 => state.show_clicks = !state.show_clicks,
-                    1 => state.show_vy = !state.show_vy,
-                    _ => {}
+            let in_scrubber =
+                (my as usize) >= layout.scrubber_top && (my as usize) < layout.scrubber_bottom;
+            let mut consumed_left_click = false;
+            if mouse_down && !state.last_mouse_down {
+                if point_in_rect(mx, my, settings_button_rect(width)) {
+                    state.show_settings_panel = !state.show_settings_panel;
+                    consumed_left_click = true;
+                } else if state.show_settings_panel
+                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my)
+                {
+                    match toggle {
+                        SettingsToggle::MainHitbox => {
+                            state.show_main_hitbox = !state.show_main_hitbox;
+                        }
+                        SettingsToggle::RotatedHitbox => {
+                            state.show_rotated_hitbox = !state.show_rotated_hitbox;
+                        }
+                        SettingsToggle::CoreHitbox => {
+                            state.show_core_hitbox = !state.show_core_hitbox;
+                        }
+                        SettingsToggle::Trail => {
+                            state.show_trail = !state.show_trail;
+                        }
+                        SettingsToggle::ClickBar => {
+                            state.show_clicks = !state.show_clicks;
+                        }
+                        SettingsToggle::VelocityBar => {
+                            state.show_vy = !state.show_vy;
+                        }
+                    }
+                    consumed_left_click = true;
                 }
-            } else if mouse_down && (in_scrubber || state.scrubbing) {
+            }
+            if !consumed_left_click && mouse_down && (in_scrubber || state.scrubbing) {
                 state.scrubbing = true;
                 let t = (mx / width as f32).clamp(0.0, 1.0);
                 state.current_tick = ((trace.len() - 1) as f32 * t).round() as usize;
@@ -592,7 +622,7 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
 
         // ---- render ----
         let visible_trace = &trace[..=state.current_tick];
-        render_scene(&mut buffer, &viewport, level, visible_trace);
+        render_scene(&mut buffer, &viewport, level, visible_trace, &state);
         if state.show_clicks {
             draw_press_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
         }
@@ -600,15 +630,13 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
             draw_vy_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
         }
         draw_scrubber_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
-        draw_settings_buttons(&mut buffer, width, &state);
+        draw_settings_ui(&mut buffer, width, height, &state);
 
         window.set_title(&format!(
-            "gd-real-sim | tick {}/{} | zoom {:.2}x | clicks:{} vy:{} follow:{}",
+            "gd-real-sim | tick {}/{} | zoom {:.2}x | follow:{}",
             state.current_tick,
             trace.len() - 1,
             state.zoom,
-            on_off(state.show_clicks),
-            on_off(state.show_vy),
             on_off(state.follow_cube),
         ));
 
@@ -623,8 +651,7 @@ fn on_off(b: bool) -> &'static str {
 }
 
 fn base_scale(_height: usize, layout: &Layout) -> f32 {
-    let plot_height =
-        (layout.plot_bottom.saturating_sub(layout.plot_top) as f32 - 48.0).max(1.0);
+    let plot_height = (layout.plot_bottom.saturating_sub(layout.plot_top) as f32 - 48.0).max(1.0);
     (plot_height / (VIEW_HEIGHT_BLOCKS * BLOCK_SIZE)).max(0.01)
 }
 
@@ -706,6 +733,7 @@ fn render_scene(
     viewport: &Viewport,
     level: &Level,
     trace: &[gd_real_sim::sim::TraceFrame],
+    state: &VizState,
 ) {
     buffer.fill(BG_COLOR);
 
@@ -742,23 +770,14 @@ fn render_scene(
         }
     }
 
-    // The trail visualizes the non-rotated outer 30x30 hitbox (used for
-    // slope selection and detach). The rotated hitbox is an internal
-    // physics concept and is not drawn here. The non-rotated hitbox is
-    // axis-aligned by definition and never rotates.
-    let step = (trace.len() / 800).max(1);
-    for frame in trace.iter().step_by(step) {
-        let half = player_half(frame.state.mini);
-        draw_rect_outline_alpha(
-            buffer,
-            viewport,
-            frame.state.x - half,
-            frame.state.y - half,
-            frame.state.x + half,
-            frame.state.y + half,
-            CUBE_COLOR,
-            CUBE_ALPHA,
-        );
+    if state.show_trail {
+        let step = (trace.len() / 800).max(1);
+        for frame in trace.iter().step_by(step) {
+            draw_player_hitboxes(buffer, viewport, frame.state, state, CUBE_ALPHA);
+        }
+    }
+    if let Some(current) = trace.last() {
+        draw_player_hitboxes(buffer, viewport, current.state, state, HITBOX_CURRENT_ALPHA);
     }
 
     // Bars (press / vy / scrubber) are drawn by `launch_visualizer` after
@@ -1014,7 +1033,15 @@ fn draw_press_bar(
             }
         }
     }
-    draw_playhead(buffer, view.width, view.height, y_start, y_end, trace.len(), current_tick);
+    draw_playhead(
+        buffer,
+        view.width,
+        view.height,
+        y_start,
+        y_end,
+        trace.len(),
+        current_tick,
+    );
 }
 
 /// Y-velocity bar. Each column = one tick (linearly spread across width).
@@ -1071,7 +1098,15 @@ fn draw_vy_bar(
             }
         }
     }
-    draw_playhead(buffer, view.width, view.height, y_start, y_end, trace.len(), current_tick);
+    draw_playhead(
+        buffer,
+        view.width,
+        view.height,
+        y_start,
+        y_end,
+        trace.len(),
+        current_tick,
+    );
 }
 
 /// Top scrubber bar. Click-and-drag to seek through `current_tick`.
@@ -1139,51 +1174,229 @@ fn fill_band(buffer: &mut [u32], width: usize, y_start: usize, y_end: usize, col
     }
 }
 
-/// Two settings buttons in the top-right corner: clicks toggle then vy
-/// toggle. Each is a 22x22 colored square with a hand-drawn glyph. ON shows
-/// green background, OFF shows neutral. Click to toggle.
-fn draw_settings_buttons(buffer: &mut [u32], width: usize, state: &VizState) {
-    let buttons = [(state.show_clicks, 'C'), (state.show_vy, 'V')];
-    let total = 2 * SETTINGS_BTN_SIZE + SETTINGS_BTN_GAP;
-    let mut x = width as i32 - 4 - total;
-    let y_top = 4 + SCRUBBER_HEIGHT as i32; // tucked just below scrubber
-    for (on, glyph) in buttons {
-        let bg = if on { SETTINGS_BTN_BG_ON } else { SETTINGS_BTN_BG_OFF };
-        // Filled square.
-        for yy in y_top..y_top + SETTINGS_BTN_SIZE {
-            for xx in x..x + SETTINGS_BTN_SIZE {
-                if yy >= 0 && (yy as usize) < buffer.len() / width
-                    && xx >= 0 && (xx as usize) < width
-                {
-                    buffer[yy as usize * width + xx as usize] = bg;
-                }
-            }
+#[derive(Clone, Copy)]
+enum SettingsToggle {
+    MainHitbox,
+    RotatedHitbox,
+    CoreHitbox,
+    Trail,
+    ClickBar,
+    VelocityBar,
+}
+
+struct SettingsRow {
+    glyph: char,
+    on: bool,
+}
+
+fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &VizState) {
+    let (bx, by, bw, bh) = settings_button_rect(width);
+    fill_rect(buffer, width, bx, by, bw, bh, SETTINGS_BTN_BG_OFF);
+    draw_glyph_border(buffer, width, bx, by, bw, SETTINGS_BTN_BORDER);
+    draw_toggle_glyph(buffer, width, bx + 6, by + 5, 'S', SETTINGS_BTN_BORDER);
+    if !state.show_settings_panel {
+        return;
+    }
+    let (px, py, pw, ph) = settings_panel_rect(width);
+    fill_rect(buffer, width, px, py, pw, ph, SETTINGS_PANEL_BG);
+    draw_rect_border(buffer, width, px, py, pw, ph, SETTINGS_BTN_BORDER);
+    let rows = settings_rows(state);
+    for (i, row) in rows.iter().enumerate() {
+        let ry =
+            py + SETTINGS_PANEL_PAD + i as i32 * (SETTINGS_PANEL_ROW_H + SETTINGS_PANEL_ROW_GAP);
+        let row_bg = if row.on {
+            SETTINGS_BTN_BG_ON
+        } else {
+            SETTINGS_BTN_BG_OFF
+        };
+        fill_rect(
+            buffer,
+            width,
+            px + SETTINGS_PANEL_PAD,
+            ry,
+            pw - 2 * SETTINGS_PANEL_PAD,
+            SETTINGS_PANEL_ROW_H,
+            row_bg,
+        );
+        draw_rect_border(
+            buffer,
+            width,
+            px + SETTINGS_PANEL_PAD,
+            ry,
+            pw - 2 * SETTINGS_PANEL_PAD,
+            SETTINGS_PANEL_ROW_H,
+            SETTINGS_BTN_BORDER,
+        );
+        draw_toggle_glyph(
+            buffer,
+            width,
+            px + SETTINGS_PANEL_PAD + 6,
+            ry + 4,
+            row.glyph,
+            SETTINGS_BTN_BORDER,
+        );
+        draw_toggle_glyph(
+            buffer,
+            width,
+            px + pw - SETTINGS_PANEL_PAD - 16,
+            ry + 4,
+            if row.on { '1' } else { '0' },
+            SETTINGS_BTN_BORDER,
+        );
+    }
+}
+
+fn settings_rows_len() -> usize {
+    6
+}
+
+fn settings_rows(state: &VizState) -> [SettingsRow; 6] {
+    [
+        SettingsRow {
+            glyph: 'M',
+            on: state.show_main_hitbox,
+        },
+        SettingsRow {
+            glyph: 'R',
+            on: state.show_rotated_hitbox,
+        },
+        SettingsRow {
+            glyph: 'I',
+            on: state.show_core_hitbox,
+        },
+        SettingsRow {
+            glyph: 'T',
+            on: state.show_trail,
+        },
+        SettingsRow {
+            glyph: 'C',
+            on: state.show_clicks,
+        },
+        SettingsRow {
+            glyph: 'V',
+            on: state.show_vy,
+        },
+    ]
+}
+
+fn settings_button_rect(width: usize) -> (i32, i32, i32, i32) {
+    let x = width as i32 - 4 - SETTINGS_BTN_SIZE;
+    let y = 4 + SCRUBBER_HEIGHT as i32;
+    (x, y, SETTINGS_BTN_SIZE, SETTINGS_BTN_SIZE)
+}
+
+fn settings_panel_rect(width: usize) -> (i32, i32, i32, i32) {
+    let rows = settings_rows_len() as i32;
+    let panel_h =
+        SETTINGS_PANEL_PAD * 2 + rows * SETTINGS_PANEL_ROW_H + (rows - 1) * SETTINGS_PANEL_ROW_GAP;
+    let (bx, by, _, bh) = settings_button_rect(width);
+    let x = bx - (SETTINGS_PANEL_WIDTH - SETTINGS_BTN_SIZE);
+    let y = by + bh + SETTINGS_BTN_GAP;
+    (x, y, SETTINGS_PANEL_WIDTH, panel_h)
+}
+
+fn settings_panel_toggle_at(width: usize, mx: f32, my: f32) -> Option<SettingsToggle> {
+    let (px, py, pw, ph) = settings_panel_rect(width);
+    if !point_in_rect(mx, my, (px, py, pw, ph)) {
+        return None;
+    }
+    for i in 0..settings_rows_len() {
+        let ry =
+            py + SETTINGS_PANEL_PAD + i as i32 * (SETTINGS_PANEL_ROW_H + SETTINGS_PANEL_ROW_GAP);
+        let row_rect = (
+            px + SETTINGS_PANEL_PAD,
+            ry,
+            pw - 2 * SETTINGS_PANEL_PAD,
+            SETTINGS_PANEL_ROW_H,
+        );
+        if point_in_rect(mx, my, row_rect) {
+            return Some(match i {
+                0 => SettingsToggle::MainHitbox,
+                1 => SettingsToggle::RotatedHitbox,
+                2 => SettingsToggle::CoreHitbox,
+                3 => SettingsToggle::Trail,
+                4 => SettingsToggle::ClickBar,
+                _ => SettingsToggle::VelocityBar,
+            });
         }
-        // Border.
-        draw_glyph_border(buffer, width, x, y_top, SETTINGS_BTN_SIZE, SETTINGS_BTN_BORDER);
-        // Glyph stroked manually with line primitives.
-        match glyph {
-            'C' => {
-                let l = x + 5;
-                let r = x + SETTINGS_BTN_SIZE - 6;
-                let t = y_top + 5;
-                let b = y_top + SETTINGS_BTN_SIZE - 6;
-                draw_h_line(buffer, width, l, r, t, SETTINGS_BTN_BORDER);
-                draw_h_line(buffer, width, l, r, b, SETTINGS_BTN_BORDER);
-                draw_v_line(buffer, width, l, t, b, SETTINGS_BTN_BORDER);
-            }
-            'V' => {
-                let l = x + 5;
-                let r = x + SETTINGS_BTN_SIZE - 6;
-                let t = y_top + 5;
-                let b = y_top + SETTINGS_BTN_SIZE - 6;
-                let mid = (l + r) / 2;
-                stroke_segment(buffer, width, l, t, mid, b, SETTINGS_BTN_BORDER);
-                stroke_segment(buffer, width, r, t, mid, b, SETTINGS_BTN_BORDER);
-            }
-            _ => {}
+    }
+    None
+}
+
+fn point_in_rect(mx: f32, my: f32, rect: (i32, i32, i32, i32)) -> bool {
+    let (x, y, w, h) = rect;
+    mx >= x as f32 && mx < (x + w) as f32 && my >= y as f32 && my < (y + h) as f32
+}
+
+fn fill_rect(buffer: &mut [u32], width: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let x0 = x.max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let x1 = (x + w).max(0) as usize;
+    let y1 = (y + h).max(0) as usize;
+    let x1 = x1.min(width);
+    let height = buffer.len() / width;
+    let y1 = y1.min(height);
+    for yy in y0..y1 {
+        let row = yy * width;
+        for xx in x0..x1 {
+            buffer[row + xx] = color;
         }
-        x += SETTINGS_BTN_SIZE + SETTINGS_BTN_GAP;
+    }
+}
+
+fn draw_toggle_glyph(buffer: &mut [u32], width: usize, x: i32, y: i32, glyph: char, color: u32) {
+    match glyph {
+        'C' => {
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_h_line(buffer, width, x, x + 8, y + 10, color);
+            draw_v_line(buffer, width, x, y, y + 10, color);
+        }
+        'V' => {
+            stroke_segment(buffer, width, x, y, x + 4, y + 10, color);
+            stroke_segment(buffer, width, x + 8, y, x + 4, y + 10, color);
+        }
+        'M' => {
+            draw_v_line(buffer, width, x, y, y + 10, color);
+            draw_v_line(buffer, width, x + 8, y, y + 10, color);
+            stroke_segment(buffer, width, x, y, x + 4, y + 5, color);
+            stroke_segment(buffer, width, x + 8, y, x + 4, y + 5, color);
+        }
+        'R' => {
+            draw_v_line(buffer, width, x, y, y + 10, color);
+            draw_h_line(buffer, width, x, x + 6, y, color);
+            draw_h_line(buffer, width, x, x + 6, y + 5, color);
+            draw_v_line(buffer, width, x + 6, y, y + 5, color);
+            stroke_segment(buffer, width, x + 3, y + 5, x + 8, y + 10, color);
+        }
+        'I' => {
+            draw_v_line(buffer, width, x + 4, y, y + 10, color);
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_h_line(buffer, width, x, x + 8, y + 10, color);
+        }
+        'T' => {
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_v_line(buffer, width, x + 4, y, y + 10, color);
+        }
+        'S' => {
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_h_line(buffer, width, x, x + 8, y + 5, color);
+            draw_h_line(buffer, width, x, x + 8, y + 10, color);
+            draw_v_line(buffer, width, x, y, y + 5, color);
+            draw_v_line(buffer, width, x + 8, y + 5, y + 10, color);
+        }
+        '1' => {
+            draw_v_line(buffer, width, x + 4, y, y + 10, color);
+        }
+        '0' => {
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_h_line(buffer, width, x, x + 8, y + 10, color);
+            draw_v_line(buffer, width, x, y, y + 10, color);
+            draw_v_line(buffer, width, x + 8, y, y + 10, color);
+        }
+        _ => {}
     }
 }
 
@@ -1192,6 +1405,16 @@ fn draw_glyph_border(buffer: &mut [u32], width: usize, x: i32, y: i32, size: i32
     draw_h_line(buffer, width, x, x + size - 1, y + size - 1, color);
     draw_v_line(buffer, width, x, y, y + size - 1, color);
     draw_v_line(buffer, width, x + size - 1, y, y + size - 1, color);
+}
+
+fn draw_rect_border(buffer: &mut [u32], width: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    draw_h_line(buffer, width, x, x + w - 1, y, color);
+    draw_h_line(buffer, width, x, x + w - 1, y + h - 1, color);
+    draw_v_line(buffer, width, x, y, y + h - 1, color);
+    draw_v_line(buffer, width, x + w - 1, y, y + h - 1, color);
 }
 
 fn draw_h_line(buffer: &mut [u32], width: usize, x0: i32, x1: i32, y: i32, color: u32) {
@@ -1303,6 +1526,77 @@ fn draw_quad_outline(buffer: &mut [u32], view: &Viewport, corners: [(f32, f32); 
         let (x1, y1) = corners[i];
         let (x2, y2) = corners[(i + 1) % 4];
         draw_line_world(buffer, view, x1, y1, x2, y2, color);
+    }
+}
+
+fn draw_quad_outline_alpha(
+    buffer: &mut [u32],
+    view: &Viewport,
+    corners: [(f32, f32); 4],
+    color: u32,
+    alpha: f32,
+) {
+    for i in 0..4 {
+        let (x1, y1) = corners[i];
+        let (x2, y2) = corners[(i + 1) % 4];
+        let (sx1, sy1) = world_to_screen(view, x1, y1);
+        let (sx2, sy2) = world_to_screen(view, x2, y2);
+        draw_line_pixels_alpha(buffer, view, sx1, sy1, sx2, sy2, color, alpha);
+    }
+}
+
+fn rotated_square_corners(cx: f32, cy: f32, half: f32, deg: f32) -> [(f32, f32); 4] {
+    let rad = deg.to_radians();
+    let c = rad.cos();
+    let s = rad.sin();
+    let pts = [(-half, -half), (half, -half), (half, half), (-half, half)];
+    let mut out = [(0.0, 0.0); 4];
+    for (i, (x, y)) in pts.iter().enumerate() {
+        out[i] = (cx + x * c - y * s, cy + x * s + y * c);
+    }
+    out
+}
+
+fn draw_player_hitboxes(
+    buffer: &mut [u32],
+    view: &Viewport,
+    state: gd_real_sim::sim::PlayerState,
+    viz: &VizState,
+    alpha: f32,
+) {
+    let half = player_half(state.mini);
+    if viz.show_main_hitbox {
+        draw_rect_outline_alpha(
+            buffer,
+            view,
+            state.x - half,
+            state.y - half,
+            state.x + half,
+            state.y + half,
+            HITBOX_MAIN_COLOR,
+            alpha,
+        );
+    }
+    if viz.show_rotated_hitbox {
+        let corners = rotated_square_corners(state.x, state.y, half, state.rotation);
+        draw_quad_outline_alpha(buffer, view, corners, HITBOX_ROTATED_COLOR, alpha);
+    }
+    if viz.show_core_hitbox {
+        let inner_half = if state.mode == gd_real_sim::sim::GameMode::Cube {
+            if state.mini { 5.0 } else { 4.5 }
+        } else {
+            half * 0.3
+        };
+        draw_rect_outline_alpha(
+            buffer,
+            view,
+            state.x - inner_half,
+            state.y - inner_half,
+            state.x + inner_half,
+            state.y + inner_half,
+            HITBOX_CORE_COLOR,
+            alpha,
+        );
     }
 }
 
@@ -1463,7 +1757,7 @@ fn blend_rgb(dst: u32, src: u32, alpha: f32) -> u32 {
 }
 
 fn player_half(mini: bool) -> f32 {
-    if mini { 7.5 } else { 15.0 }
+    if mini { 9.0 } else { 15.0 }
 }
 
 #[cfg(test)]

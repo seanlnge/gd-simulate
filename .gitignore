@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 /target-agent/
+/target-*/
 
 # Rust/Cargo local metadata
 /.cargo/
@@ -21,10 +22,16 @@ Thumbs.db
 *.trace
 *.trace.gz
 *.json.gz
+/last_out.json
 
 # Local level/object dumps and debug exports
 *_ticks.log
 *_blocks.txt
 *_trace.json
 *_trace.json.gz
+*_levelstring.txt
+objects_*.txt
+!examples/opti/objects_0_4000.txt
+out_*.json
+tmp_*
 
