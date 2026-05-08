@@ -288,12 +288,18 @@ fn clamp_opengd_flyer_y_velocity(player: &mut PlayerState) {
 }
 
 fn update_ball(player: &mut PlayerState, pressed: bool, flip_mod: f32) {
-    if player.on_ground && pressed {
+    // Ball has no rotated hitbox in gameplay; keep visual rotation neutral.
+    player.rotation = 0.0;
+    let press_start = pressed && !player.was_jump_buffered;
+    let queued_air_click = player.on_ground && player.state_ring_jump;
+    if player.on_ground && (press_start || queued_air_click) {
         // GD docs: ball click sets 0.3 * cube jump velocity, then toggles gravity.
         // Use pre-flip `flip_mod` for the impulse direction (`G`), then flip.
         player.vy = player.y_start * 0.3 * flip_mod;
         player.on_ground = false;
         player.gravity_sign = -player.gravity_sign;
+        // One click corresponds to one flip; consume queued air-click.
+        player.state_ring_jump = false;
     } else if player.on_ground {
         player.vy = 0.0;
         player.is_accelerating = false;

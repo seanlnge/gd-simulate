@@ -184,7 +184,7 @@ pub fn simulate_with_trace(
 ) -> SimResult<SimulationRun> {
     reject_unsupported(level)?;
 
-    let speed_profile = SpeedProfile::for_player_speed(0.9);
+    let speed_profile = SpeedProfile::for_player_speed(crate::consts::START_PLAYER_SPEED);
     let initial = PlayerState {
         x: -15.0,
         y: 105.0,
@@ -193,7 +193,7 @@ pub fn simulate_with_trace(
         mode: GameMode::Cube,
         gravity_sign: -1.0,
         mini: false,
-        player_speed: 0.9,
+        player_speed: crate::consts::START_PLAYER_SPEED,
         speed_multiplier: speed_profile.speed_multiplier,
         gravity: speed_profile.gravity,
         y_start: speed_profile.y_start,
@@ -412,7 +412,11 @@ fn step_player(player: &mut PlayerState, pressed: bool) {
         player.hold_ticks = 0;
     }
     if !pressed {
-        player.state_ring_jump = false;
+        // Ball click buffering is edge-triggered and consumed on landing.
+        // Do not clear the queued air-click on key release.
+        if player.mode != GameMode::Ball {
+            player.state_ring_jump = false;
+        }
         if player.dash_rotation_blocks_remaining > 0.0 {
             // Hold-to-dash behavior: release cancels active dash immediately.
             player.dash_rotation_blocks_remaining = 0.0;
@@ -1545,6 +1549,36 @@ mod tests {
     }
 
     #[test]
+    fn blue_pad_not_marked_touched_when_half_plane_rejects_then_can_activate_later() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![test_blue_pad(-180.0)],
+        };
+        let mut touched = HashSet::new();
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.x = 15.0;
+        player.y = 15.0;
+        player.gravity_sign = -1.0; // rotation -180 rejected in normal gravity
+
+        apply_pads(&level, &mut player, &mut touched, 0);
+        assert!(
+            touched.is_empty(),
+            "blue pad should not be consumed when rejected by gravity half-plane"
+        );
+        assert_eq!(player.gravity_sign, -1.0);
+
+        // Same overlap, now valid from flipped gravity side.
+        player.gravity_sign = 1.0;
+        apply_pads(&level, &mut player, &mut touched, 0);
+        assert_eq!(player.gravity_sign, -1.0, "blue pad should flip once valid");
+        assert!(
+            !touched.is_empty(),
+            "successful activation should consume pad"
+        );
+    }
+
+    #[test]
     fn pre_collision_blue_pad_can_fire_before_embedded_solid_resolution() {
         let level = Level {
             header: HashMap::new(),
@@ -1842,7 +1876,7 @@ mod tests {
     }
 
     #[test]
-    fn ball_held_input_still_flips_on_ground_contact() {
+    fn ball_held_input_does_not_flip_without_new_press_start() {
         let mut player = test_player_state();
         player.mode = GameMode::Ball;
         player.on_ground = true;
@@ -1855,14 +1889,54 @@ mod tests {
         step_player(&mut player, true);
 
         assert_eq!(
-            player.gravity_sign, 1.0,
-            "grounded held input should still flip ball gravity"
+            player.gravity_sign, -1.0,
+            "held input without press_start must not flip ball gravity"
         );
         assert!(
-            (player.vy - (11.1800318 * 0.3)).abs() < 0.001,
-            "grounded held input should still apply ball click impulse; got {}",
+            player.vy.abs() < 0.001,
+            "held input without press_start should not apply impulse; got {}",
             player.vy
         );
+    }
+
+    #[test]
+    fn ball_midair_click_buffers_single_flip_until_landing() {
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.on_ground = false;
+        player.gravity_sign = -1.0;
+        player.y_start = 11.1800318;
+
+        // Midair click edge queues a landing flip.
+        step_player(&mut player, true);
+        assert!(
+            player.state_ring_jump,
+            "midair click should queue ball flip"
+        );
+        let queued_gravity = player.gravity_sign;
+
+        // Release before landing: queue should persist.
+        step_player(&mut player, false);
+        assert!(
+            player.state_ring_jump,
+            "releasing should not clear queued ball flip"
+        );
+        assert_eq!(player.gravity_sign, queued_gravity);
+
+        // On landing, queued click is consumed once even without fresh press.
+        player.on_ground = true;
+        step_player(&mut player, false);
+        assert_eq!(player.gravity_sign, -queued_gravity);
+        assert!(
+            !player.state_ring_jump,
+            "queued flip should be consumed on landing"
+        );
+
+        // Staying held/released should not immediately flip again.
+        player.on_ground = true;
+        let post_flip_gravity = player.gravity_sign;
+        step_player(&mut player, false);
+        assert_eq!(player.gravity_sign, post_flip_gravity);
     }
 
     #[test]
@@ -2025,6 +2099,75 @@ mod tests {
     }
 
     #[test]
+    fn speed_portal_updates_player_speed_and_profile_on_overlap() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![LevelObject {
+                object_id: 202,
+                x: 120.0,
+                y: 200.0,
+                rotation: 0.0,
+                scale: 1.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                groups: Vec::new(),
+                kind: ObjectKind::SpeedPortal,
+                hitbox: Some(HitboxData::Box {
+                    offset: [0.0, 0.0],
+                    half_extents: [25.5, 28.0],
+                }),
+                raw: HashMap::new(),
+            }],
+        };
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.x = 120.0;
+        player.y = 200.0;
+        let mut touched = HashSet::new();
+        let teleports: Vec<&LevelObject> = Vec::new();
+        let mut touched_teleports = HashSet::new();
+        let mut dual_activate = false;
+        let mut dual_deactivate = false;
+
+        apply_portals(
+            &level,
+            &mut player,
+            &mut touched,
+            &teleports,
+            &mut touched_teleports,
+            &mut dual_activate,
+            &mut dual_deactivate,
+            0,
+        );
+
+        let expected_ps = player_speed_for_portal(202);
+        let expected_profile = SpeedProfile::for_player_speed(expected_ps);
+        assert!(
+            (player.player_speed - expected_ps).abs() < 0.0001,
+            "speed portal should set player_speed to {expected_ps}, got {}",
+            player.player_speed
+        );
+        assert!((player.speed_multiplier - expected_profile.speed_multiplier).abs() < 0.0001);
+        assert!((player.vx - expected_profile.speed_multiplier).abs() < 0.0001);
+    }
+
+    #[test]
+    fn ball_portal_overlap_uses_outer_hitbox_not_inner_core_box() {
+        let portal = test_portal(11, ObjectKind::GravityPortal, 120.0, 200.0);
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.mini = false;
+        // Overlaps with outer 30x30 player box, but not a 9x9 inner box.
+        player.x = 147.4;
+        player.y = 200.0;
+
+        assert!(
+            intersects_player(&portal, player),
+            "ball should trigger portal when outer hitbox overlaps activation rect"
+        );
+    }
+
+    #[test]
     fn rotated_gravity_portal_does_not_trigger_far_left_from_center() {
         let portal = LevelObject {
             object_id: 11,
@@ -2116,7 +2259,7 @@ mod tests {
         player.gravity_sign = -1.0;
         player.y_start = 11.1800318;
 
-        apply_gravity_jump_orb(&mut player);
+        apply_blue_orb(&mut player);
         let expected = 11.1800318 * 0.4;
         assert_eq!(player.gravity_sign, 1.0);
         assert!(

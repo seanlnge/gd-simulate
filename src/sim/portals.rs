@@ -1,3 +1,7 @@
+use crate::consts::{
+    PLAYER_SPEED_0_5X, PLAYER_SPEED_1X, PLAYER_SPEED_2X, PLAYER_SPEED_3X, PLAYER_SPEED_4X,
+};
+
 // ---------- Portals ----------
 
 #[allow(clippy::too_many_arguments)]
@@ -121,12 +125,12 @@ fn mode_for_portal(object_id: u32) -> GameMode {
 
 fn player_speed_for_portal(object_id: u32) -> f32 {
     match object_id {
-        200 => 0.7,
-        201 => 0.9,
-        202 => 1.1,
-        203 => 1.3,
-        1334 => 1.6,
-        _ => 0.9,
+        200 => PLAYER_SPEED_0_5X,
+        201 => PLAYER_SPEED_1X,
+        202 => PLAYER_SPEED_2X,
+        203 => PLAYER_SPEED_3X,
+        1334 => PLAYER_SPEED_4X,
+        _ => PLAYER_SPEED_1X,
     }
 }
 

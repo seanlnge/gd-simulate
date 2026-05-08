@@ -1,3 +1,5 @@
+use crate::consts::{PLAYER_SPEED_0_5X, PLAYER_SPEED_1X, PLAYER_SPEED_3X, PLAYER_SPEED_4X};
+
 pub const PHYSICS_TICKS_PER_SECOND: f32 = 240.0;
 
 /// Mirrors the substep calculation shape in GJBaseGameLayer_update.cpp.
@@ -37,7 +39,13 @@ pub struct SpeedProfile {
 impl SpeedProfile {
     /// Port of the hardcoded thresholds in PlayerObject_updateTimeMod.cpp.
     pub fn for_player_speed(speed: f32) -> Self {
-        if speed > 1.0 {
+        if (speed - PLAYER_SPEED_3X).abs() < 0.001 || (speed - PLAYER_SPEED_4X).abs() < 0.001 {
+            Self {
+                y_start: 11.230032,
+                gravity: 0.961199,
+                speed_multiplier: 6.000002,
+            }
+        } else if speed > PLAYER_SPEED_1X + 0.001 {
             Self {
                 y_start: 11.420032,
                 gravity: 0.957199,
@@ -49,17 +57,11 @@ impl SpeedProfile {
                 gravity: 0.958199024,
                 speed_multiplier: 5.77000189,
             }
-        } else if speed == 0.7 {
+        } else if (speed - PLAYER_SPEED_0_5X).abs() < 0.001 {
             Self {
                 y_start: 10.620032,
                 gravity: 0.940199,
                 speed_multiplier: 5.980002,
-            }
-        } else if speed == 1.3 || speed == 1.6 {
-            Self {
-                y_start: 11.230032,
-                gravity: 0.961199,
-                speed_multiplier: 6.000002,
             }
         } else {
             Self {

@@ -72,9 +72,9 @@ fn synthetic_activation_rect(object: &LevelObject) -> Option<Rect> {
 }
 
 fn intersects_player(object: &LevelObject, player: PlayerState) -> bool {
-    if is_portal_kind(object.kind) && player.mode == GameMode::Ball {
-        if let Some(rect) = portal_activation_rect(object) {
-            return intersects_box_player(rect, player, ball_blue_half(player.mini));
+    if is_portal_kind(object.kind) {
+        if let Some(corners) = portal_activation_quad(object) {
+            return intersects_oriented_quad_player(corners, player, player.player_half());
         }
         return false;
     }
@@ -82,10 +82,6 @@ fn intersects_player(object: &LevelObject, player: PlayerState) -> bool {
         return false;
     };
     intersects_box_player(rect, player, player.player_half())
-}
-
-fn ball_blue_half(mini: bool) -> f32 {
-    if mini { 5.0 } else { 4.5 }
 }
 
 fn is_portal_kind(kind: ObjectKind) -> bool {
@@ -101,26 +97,104 @@ fn is_portal_kind(kind: ObjectKind) -> bool {
     )
 }
 
-fn portal_activation_rect(object: &LevelObject) -> Option<Rect> {
-    // Portal interactions in this model should not expand with object rotation.
-    // Rotated AABB expansion was causing visibly-early portal triggers.
-    if let Some(HitboxData::Box {
-        offset,
-        half_extents,
-    }) = object.hitbox
-    {
-        return Some(Rect {
-            center: [
-                object.x + offset[0] * object.scale_x,
-                object.y + offset[1] * object.scale_y,
-            ],
-            half_extents: [
-                half_extents[0] * object.scale_x.abs(),
-                half_extents[1] * object.scale_y.abs(),
-            ],
-        });
+fn portal_activation_quad(object: &LevelObject) -> Option<[(f32, f32); 4]> {
+    if let Some(transform) = opengd_box_transform(object) {
+        return Some(transform.corners);
     }
-    synthetic_activation_rect(object)
+    // Fallback for activation-only portal objects that do not have a box
+    // hitbox in object data.
+    if is_portal_kind(object.kind) {
+        let hx = 15.0_f32;
+        let hy = 45.0_f32;
+        return Some([
+            slope_local_to_world_point(
+                object.x,
+                object.y,
+                object.rotation,
+                object.scale_x,
+                object.scale_y,
+                -hx,
+                -hy,
+            ),
+            slope_local_to_world_point(
+                object.x,
+                object.y,
+                object.rotation,
+                object.scale_x,
+                object.scale_y,
+                hx,
+                -hy,
+            ),
+            slope_local_to_world_point(
+                object.x,
+                object.y,
+                object.rotation,
+                object.scale_x,
+                object.scale_y,
+                hx,
+                hy,
+            ),
+            slope_local_to_world_point(
+                object.x,
+                object.y,
+                object.rotation,
+                object.scale_x,
+                object.scale_y,
+                -hx,
+                hy,
+            ),
+        ]);
+    }
+    None
+}
+
+fn intersects_oriented_quad_player(
+    quad: [(f32, f32); 4],
+    player: PlayerState,
+    player_half: f32,
+) -> bool {
+    let player_corners = [
+        (player.x - player_half, player.y - player_half),
+        (player.x + player_half, player.y - player_half),
+        (player.x + player_half, player.y + player_half),
+        (player.x - player_half, player.y + player_half),
+    ];
+
+    let mut axes = Vec::with_capacity(4);
+    axes.push((1.0_f32, 0.0_f32));
+    axes.push((0.0_f32, 1.0_f32));
+    for i in 0..2 {
+        let (x1, y1) = quad[i];
+        let (x2, y2) = quad[(i + 1) % 4];
+        let edge_x = x2 - x1;
+        let edge_y = y2 - y1;
+        let axis = (-edge_y, edge_x);
+        let len_sq = axis.0 * axis.0 + axis.1 * axis.1;
+        if len_sq > 1e-8 {
+            let inv_len = len_sq.sqrt().recip();
+            axes.push((axis.0 * inv_len, axis.1 * inv_len));
+        }
+    }
+
+    for axis in axes {
+        let (q_min, q_max) = project_points(axis, &quad);
+        let (p_min, p_max) = project_points(axis, &player_corners);
+        if q_max < p_min || p_max < q_min {
+            return false;
+        }
+    }
+    true
+}
+
+fn project_points(axis: (f32, f32), points: &[(f32, f32); 4]) -> (f32, f32) {
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &(x, y) in points {
+        let p = x * axis.0 + y * axis.1;
+        min = min.min(p);
+        max = max.max(p);
+    }
+    (min, max)
 }
 
 fn intersects_box_player(rect: Rect, player: PlayerState, player_half: f32) -> bool {

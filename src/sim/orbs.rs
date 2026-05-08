@@ -42,7 +42,7 @@ fn apply_orbs(
                 true
             }
             84 => {
-                apply_gravity_jump_orb(player);
+                apply_blue_orb(player);
                 true
             }
             141 => {
@@ -136,13 +136,13 @@ fn apply_red_orb(player: &mut PlayerState) {
     };
 }
 
-fn apply_gravity_jump_orb(player: &mut PlayerState) {
+fn apply_blue_orb(player: &mut PlayerState) {
     let base = cube_yellow_velocity(player);
     let cube_scale = mini_cube_pulse_scale(player);
     player.vy = match player.mode {
         GameMode::Cube => base * 0.4 * cube_scale,
         GameMode::Ship => base * 0.4,
-        GameMode::Ball | GameMode::Spider => base * 0.7 * 0.4,
+        GameMode::Ball | GameMode::Spider => base * 0.4 * 0.7,
         GameMode::Ufo => base * 0.4,
         GameMode::Wave => player.vy,
         GameMode::Robot => base * 0.9 * 0.4,
@@ -151,9 +151,9 @@ fn apply_gravity_jump_orb(player: &mut PlayerState) {
     player.gravity_sign = -player.gravity_sign;
 }
 
+
 fn apply_green_orb(player: &mut PlayerState) {
-    // User-validated behavior: flip gravity, then apply jump impulse.
-    // Reuse yellow-orb mode table in the new gravity frame.
+    // Green orb: flip gravity, then apply yellow-orb impulse table in the new gravity.
     player.gravity_sign = -player.gravity_sign;
     apply_yellow_orb(player);
 }

@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod collision;
+pub mod consts;
 pub mod error;
 pub mod input;
 pub mod level;

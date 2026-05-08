@@ -18,23 +18,36 @@ fn apply_pads(
         if !intersects_pad_activation(object, *player) {
             continue;
         }
-        touched.insert(key);
         let flip_mod = player.flip_mod();
         let rot = object.rotation;
         let sy = object.scale_y;
-        match object.object_id {
-            35 => apply_yellow_pad(player, flip_mod, rot, sy),
+        let activated = match object.object_id {
+            35 => {
+                apply_yellow_pad(player, flip_mod, rot, sy);
+                true
+            }
             67 => {
                 if gravity_pad_can_activate(player.gravity_sign, rot, sy) {
                     apply_blue_pad(player, rot, sy);
+                    true
                 } else {
-                    continue;
+                    false
                 }
             }
-            140 => apply_purple_pad(player, flip_mod, rot, sy),
-            1332 => apply_red_pad(player, flip_mod, rot, sy),
-            _ => {}
+            140 => {
+                apply_purple_pad(player, flip_mod, rot, sy);
+                true
+            }
+            1332 => {
+                apply_red_pad(player, flip_mod, rot, sy);
+                true
+            }
+            _ => false,
+        };
+        if !activated {
+            continue;
         }
+        touched.insert(key);
         player.on_ground = false;
         applied_this_tick = true;
     }

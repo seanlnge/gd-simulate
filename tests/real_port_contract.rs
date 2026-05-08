@@ -637,11 +637,12 @@ fn speed_portal_updates_player_speed_state() {
     )
     .unwrap();
 
-    // After passing the portal the stored player_speed should be 1.1.
+    // After passing the portal the stored player_speed should match id 202.
     assert!(
-        run.trace
-            .iter()
-            .any(|frame| (frame.state.player_speed - 1.1).abs() < 1e-4),
+        run.trace.iter().any(|frame| (frame.state.player_speed
+            - gd_real_sim::consts::PLAYER_SPEED_2X)
+            .abs()
+            < 1e-4),
         "speed portal did not update player_speed"
     );
 }

@@ -314,6 +314,23 @@ const PRESS_BAR_PRESSED_COLOR: u32 = 0x32C950;
 const PRESS_BAR_RELEASED_COLOR: u32 = 0xD64545;
 const PRESS_BAR_UNKNOWN_COLOR: u32 = 0x3A3A48;
 const PRESS_BAR_HEIGHT: usize = 18;
+const SPEED_BAR_HEIGHT: usize = 16;
+const MODE_BAR_HEIGHT: usize = 16;
+const SPEED_BAR_BG_COLOR: u32 = 0x1B1F2E;
+const SPEED_BAR_UNKNOWN_COLOR: u32 = 0x3A3A48;
+const SPEED_BAR_200_COLOR: u32 = 0xFF9900; // orange
+const SPEED_BAR_201_COLOR: u32 = 0x3399FF; // blue
+const SPEED_BAR_202_COLOR: u32 = 0x32C950; // green
+const SPEED_BAR_203_COLOR: u32 = 0xAA66FF; // purple
+const SPEED_BAR_1334_COLOR: u32 = 0xFF4040; // red
+const MODE_BAR_BG_COLOR: u32 = 0x1B1F2E;
+const MODE_BAR_CUBE_COLOR: u32 = 0x32C950; // green
+const MODE_BAR_SHIP_COLOR: u32 = 0xB06BFF; // purple
+const MODE_BAR_BALL_COLOR: u32 = 0xFF4040; // red
+const MODE_BAR_UFO_COLOR: u32 = 0xFF9900; // orange
+const MODE_BAR_WAVE_COLOR: u32 = 0x3399FF; // blue
+const MODE_BAR_SPIDER_COLOR: u32 = 0x7D3EC7; // dark purple
+const MODE_BAR_SWING_COLOR: u32 = 0xFFE066; // yellow
 const VY_BAR_HEIGHT: usize = 28;
 const VY_BAR_BG_COLOR: u32 = 0x1B1F2E;
 const VY_BAR_ZERO_COLOR: u32 = 0x3A3A48;
@@ -357,6 +374,8 @@ struct VizState {
     scroll_y: f32,
     zoom: f32,
     show_clicks: bool,
+    show_speed: bool,
+    show_mode: bool,
     show_vy: bool,
     show_main_hitbox: bool,
     show_rotated_hitbox: bool,
@@ -402,11 +421,21 @@ struct Layout {
     plot_bottom: usize,
     press_top: Option<usize>,
     press_bottom: Option<usize>,
+    speed_top: Option<usize>,
+    speed_bottom: Option<usize>,
+    mode_top: Option<usize>,
+    mode_bottom: Option<usize>,
     vy_top: Option<usize>,
     vy_bottom: Option<usize>,
 }
 
-fn compute_layout(height: usize, show_clicks: bool, show_vy: bool) -> Layout {
+fn compute_layout(
+    height: usize,
+    show_clicks: bool,
+    show_speed: bool,
+    show_mode: bool,
+    show_vy: bool,
+) -> Layout {
     let scrubber_top = 0;
     let scrubber_bottom = scrubber_top + SCRUBBER_HEIGHT;
     let mut bottom = height;
@@ -424,6 +453,20 @@ fn compute_layout(height: usize, show_clicks: bool, show_vy: bool) -> Layout {
     } else {
         (None, None)
     };
+    let (speed_top, speed_bottom) = if show_speed {
+        let t = bottom.saturating_sub(SPEED_BAR_HEIGHT);
+        bottom = t;
+        (Some(t), Some(t + SPEED_BAR_HEIGHT))
+    } else {
+        (None, None)
+    };
+    let (mode_top, mode_bottom) = if show_mode {
+        let t = bottom.saturating_sub(MODE_BAR_HEIGHT);
+        bottom = t;
+        (Some(t), Some(t + MODE_BAR_HEIGHT))
+    } else {
+        (None, None)
+    };
     Layout {
         scrubber_top,
         scrubber_bottom,
@@ -431,6 +474,10 @@ fn compute_layout(height: usize, show_clicks: bool, show_vy: bool) -> Layout {
         plot_bottom: bottom,
         press_top,
         press_bottom,
+        speed_top,
+        speed_bottom,
+        mode_top,
+        mode_bottom,
         vy_top,
         vy_bottom,
     }
@@ -465,6 +512,8 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         scroll_y: 0.0,
         zoom: 1.0,
         show_clicks: true,
+        show_speed: true,
+        show_mode: true,
         show_vy: true,
         show_main_hitbox: true,
         show_rotated_hitbox: false,
@@ -515,7 +564,13 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         let mouse_down = window.get_mouse_down(MouseButton::Left);
         let rmouse_down = window.get_mouse_down(MouseButton::Right);
         let mouse_pos = window.get_mouse_pos(MouseMode::Discard);
-        let layout = compute_layout(height, state.show_clicks, state.show_vy);
+        let layout = compute_layout(
+            height,
+            state.show_clicks,
+            state.show_speed,
+            state.show_mode,
+            state.show_vy,
+        );
 
         // Right-mouse-drag pan: anchor screen<->world delta on press,
         // then accumulate (mx-anchor_mx)/scale into scroll_x and
@@ -575,6 +630,12 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
                         SettingsToggle::VelocityBar => {
                             state.show_vy = !state.show_vy;
                         }
+                        SettingsToggle::SpeedBar => {
+                            state.show_speed = !state.show_speed;
+                        }
+                        SettingsToggle::ModeBar => {
+                            state.show_mode = !state.show_mode;
+                        }
                     }
                     consumed_left_click = true;
                 }
@@ -591,7 +652,13 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         state.last_mouse_down = mouse_down;
 
         // Recompute layout after toggle changes from this tick.
-        let layout = compute_layout(height, state.show_clicks, state.show_vy);
+        let layout = compute_layout(
+            height,
+            state.show_clicks,
+            state.show_speed,
+            state.show_mode,
+            state.show_vy,
+        );
 
         // Optional follow-cube: snap scroll_x so the scrubbed cube is centered.
         if state.follow_cube {
@@ -625,6 +692,12 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         render_scene(&mut buffer, &viewport, level, visible_trace, &state);
         if state.show_clicks {
             draw_press_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
+        }
+        if state.show_speed {
+            draw_speed_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
+        }
+        if state.show_mode {
+            draw_mode_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
         }
         if state.show_vy {
             draw_vy_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
@@ -1109,6 +1182,124 @@ fn draw_vy_bar(
     );
 }
 
+/// Speed portal bar. Colors track canonical speed-portal tiers:
+/// 200=orange, 201=blue, 202=green, 203=purple, 1334=red.
+/// Any non-tier speed (e.g. start speed) is shown in unknown gray.
+fn draw_speed_bar(
+    buffer: &mut [u32],
+    view: &Viewport,
+    layout: &Layout,
+    trace: &[gd_real_sim::sim::TraceFrame],
+    current_tick: usize,
+) {
+    let (Some(y_start), Some(y_end)) = (layout.speed_top, layout.speed_bottom) else {
+        return;
+    };
+    fill_band(buffer, view.width, y_start, y_end, SPEED_BAR_BG_COLOR);
+
+    if trace.len() < 2 {
+        return;
+    }
+    let total = (trace.len() - 1) as f32;
+    for (i, frame) in trace.iter().enumerate() {
+        let t0 = i as f32 / total;
+        let t1 = ((i + 1) as f32 / total).min(1.0);
+        let x0 = (t0 * view.width as f32) as i32;
+        let x1 = (t1 * view.width as f32) as i32;
+        let color = speed_color_for_player_speed(frame.state.player_speed);
+        for y in y_start..y_end {
+            let row = y * view.width;
+            for x in x0.max(0)..x1.min(view.width as i32) {
+                buffer[row + x as usize] = color;
+            }
+        }
+    }
+    draw_playhead(
+        buffer,
+        view.width,
+        view.height,
+        y_start,
+        y_end,
+        trace.len(),
+        current_tick,
+    );
+}
+
+/// Gamemode bar. Colors: cube=green, ship=purple, ball=red, ufo=orange,
+/// wave=blue, spider=dark purple, swing=yellow.
+fn draw_mode_bar(
+    buffer: &mut [u32],
+    view: &Viewport,
+    layout: &Layout,
+    trace: &[gd_real_sim::sim::TraceFrame],
+    current_tick: usize,
+) {
+    let (Some(y_start), Some(y_end)) = (layout.mode_top, layout.mode_bottom) else {
+        return;
+    };
+    fill_band(buffer, view.width, y_start, y_end, MODE_BAR_BG_COLOR);
+
+    if trace.len() < 2 {
+        return;
+    }
+    let total = (trace.len() - 1) as f32;
+    for (i, frame) in trace.iter().enumerate() {
+        let t0 = i as f32 / total;
+        let t1 = ((i + 1) as f32 / total).min(1.0);
+        let x0 = (t0 * view.width as f32) as i32;
+        let x1 = (t1 * view.width as f32) as i32;
+        let color = mode_color(frame.state.mode);
+        for y in y_start..y_end {
+            let row = y * view.width;
+            for x in x0.max(0)..x1.min(view.width as i32) {
+                buffer[row + x as usize] = color;
+            }
+        }
+    }
+    draw_playhead(
+        buffer,
+        view.width,
+        view.height,
+        y_start,
+        y_end,
+        trace.len(),
+        current_tick,
+    );
+}
+
+fn speed_color_for_player_speed(player_speed: f32) -> u32 {
+    const EPS: f32 = 0.01;
+    if (player_speed - gd_real_sim::consts::PLAYER_SPEED_0_5X).abs() <= EPS {
+        return SPEED_BAR_200_COLOR;
+    }
+    if (player_speed - gd_real_sim::consts::PLAYER_SPEED_1X).abs() <= EPS {
+        return SPEED_BAR_201_COLOR;
+    }
+    if (player_speed - gd_real_sim::consts::PLAYER_SPEED_2X).abs() <= EPS {
+        return SPEED_BAR_202_COLOR;
+    }
+    if (player_speed - gd_real_sim::consts::PLAYER_SPEED_3X).abs() <= EPS {
+        return SPEED_BAR_203_COLOR;
+    }
+    if (player_speed - gd_real_sim::consts::PLAYER_SPEED_4X).abs() <= EPS {
+        return SPEED_BAR_1334_COLOR;
+    }
+    SPEED_BAR_UNKNOWN_COLOR
+}
+
+fn mode_color(mode: gd_real_sim::sim::GameMode) -> u32 {
+    match mode {
+        gd_real_sim::sim::GameMode::Cube => MODE_BAR_CUBE_COLOR,
+        gd_real_sim::sim::GameMode::Ship => MODE_BAR_SHIP_COLOR,
+        gd_real_sim::sim::GameMode::Ball => MODE_BAR_BALL_COLOR,
+        gd_real_sim::sim::GameMode::Ufo => MODE_BAR_UFO_COLOR,
+        gd_real_sim::sim::GameMode::Wave => MODE_BAR_WAVE_COLOR,
+        gd_real_sim::sim::GameMode::Spider => MODE_BAR_SPIDER_COLOR,
+        gd_real_sim::sim::GameMode::Swing => MODE_BAR_SWING_COLOR,
+        gd_real_sim::sim::GameMode::Robot => MODE_BAR_CUBE_COLOR,
+    }
+}
+
 /// Top scrubber bar. Click-and-drag to seek through `current_tick`.
 fn draw_scrubber_bar(
     buffer: &mut [u32],
@@ -1182,6 +1373,8 @@ enum SettingsToggle {
     Trail,
     ClickBar,
     VelocityBar,
+    SpeedBar,
+    ModeBar,
 }
 
 struct SettingsRow {
@@ -1247,10 +1440,10 @@ fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &Vi
 }
 
 fn settings_rows_len() -> usize {
-    6
+    8
 }
 
-fn settings_rows(state: &VizState) -> [SettingsRow; 6] {
+fn settings_rows(state: &VizState) -> [SettingsRow; 8] {
     [
         SettingsRow {
             glyph: 'M',
@@ -1275,6 +1468,14 @@ fn settings_rows(state: &VizState) -> [SettingsRow; 6] {
         SettingsRow {
             glyph: 'V',
             on: state.show_vy,
+        },
+        SettingsRow {
+            glyph: 'P',
+            on: state.show_speed,
+        },
+        SettingsRow {
+            glyph: 'G',
+            on: state.show_mode,
         },
     ]
 }
@@ -1316,7 +1517,9 @@ fn settings_panel_toggle_at(width: usize, mx: f32, my: f32) -> Option<SettingsTo
                 2 => SettingsToggle::CoreHitbox,
                 3 => SettingsToggle::Trail,
                 4 => SettingsToggle::ClickBar,
-                _ => SettingsToggle::VelocityBar,
+                5 => SettingsToggle::VelocityBar,
+                6 => SettingsToggle::SpeedBar,
+                _ => SettingsToggle::ModeBar,
             });
         }
     }
@@ -1386,6 +1589,13 @@ fn draw_toggle_glyph(buffer: &mut [u32], width: usize, x: i32, y: i32, glyph: ch
             draw_h_line(buffer, width, x, x + 8, y + 10, color);
             draw_v_line(buffer, width, x, y, y + 5, color);
             draw_v_line(buffer, width, x + 8, y + 5, y + 10, color);
+        }
+        'G' => {
+            draw_h_line(buffer, width, x, x + 8, y, color);
+            draw_h_line(buffer, width, x, x + 8, y + 10, color);
+            draw_v_line(buffer, width, x, y, y + 10, color);
+            draw_h_line(buffer, width, x + 4, x + 8, y + 6, color);
+            draw_v_line(buffer, width, x + 8, y + 6, y + 10, color);
         }
         '1' => {
             draw_v_line(buffer, width, x + 4, y, y + 10, color);
@@ -1578,7 +1788,12 @@ fn draw_player_hitboxes(
         );
     }
     if viz.show_rotated_hitbox {
-        let corners = rotated_square_corners(state.x, state.y, half, state.rotation);
+        let rotation = if state.mode == gd_real_sim::sim::GameMode::Ball {
+            0.0
+        } else {
+            state.rotation
+        };
+        let corners = rotated_square_corners(state.x, state.y, half, rotation);
         draw_quad_outline_alpha(buffer, view, corners, HITBOX_ROTATED_COLOR, alpha);
     }
     if viz.show_core_hitbox {
