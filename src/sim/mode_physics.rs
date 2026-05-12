@@ -6,7 +6,7 @@ fn apply_mode_physics(player: &mut PlayerState, pressed: bool) {
 
     match player.mode {
         GameMode::Cube => update_cube(player, pressed, flip_mod),
-        GameMode::Ship => update_ship(player, pressed && player.hold_ticks >= 3, flip_mod),
+        GameMode::Ship => update_ship(player, pressed, flip_mod),
         GameMode::Ball => update_ball(player, pressed, flip_mod),
         GameMode::Ufo => update_ufo(player, pressed, flip_mod, size_scale),
         GameMode::Wave => update_wave(player, pressed, flip_mod, size_scale),
@@ -177,12 +177,10 @@ fn update_ship(player: &mut PlayerState, pressed: bool, _flip_mod: f32) {
     // any boost.
 
     let used_gravity = 0.9582_f32;
-    // GDP `m_gravityMod = m_isUpsideDown ? -1 : 1`. Our `gravity_sign`
-    // is `-1` for normal and `+1` for flipped (see PlayerState comment),
-    // so `m_gravityMod = -gravity_sign`. For the ship, `flipMod()` and
-    // `m_gravityMod` are the same value (no swing-style decoupling).
-    let gravity_mod = -player.gravity_sign;
-    let flip_mod = gravity_mod;
+    // OpenGD/GDP ship acceleration applies the gravity direction through
+    // `flipMod`. Do not also bake it into the gravity scalar or inverted ship
+    // release will keep accelerating downward after a gravity portal.
+    let flip_mod = -player.gravity_sign;
     // GDP `updateJump.cpp` lines 117-130: `v16` is initially `0.8`/`1.0`
     // by mini, but the flyer branch *overwrites* mini-`v16` to `0.85`
     // (lines 128-130). `opengd_flyer_player_size` returns this final
@@ -220,8 +218,8 @@ fn update_ship(player: &mut PlayerState, pressed: bool, _flip_mod: f32) {
     // for now; v52 stays at 0.4. This is the dominant path for normal
     // ship gameplay so the parity loss is small (it kicks in only after
     // certain mid-air collisions).
-    let falling_bugged = false;
-    let v52 = if falling_bugged { 0.5 } else { 0.4 };
+    let falling_bugged = ship_player_is_falling_bugged(player);
+    let mut v52 = ship_v52(true, falling_bugged);
 
     // GDP "going up relative to gravity" check.
     let going_up_rel_gravity = if player.gravity_sign > 0.0 {
@@ -247,21 +245,77 @@ fn update_ship(player: &mut PlayerState, pressed: bool, _flip_mod: f32) {
         0.8
     };
 
-    let mut float_c = used_gravity * gravity_mod;
+    let mut float_c = used_gravity;
     if player.is_accelerating {
         if v51 < 0.0 {
             float_c = used_gravity;
         }
     } else if pressed {
         float_c = used_gravity;
+    } else {
+        // GDP's released ship branch overrides the falling-bugged boost
+        // scalar unless platformer/boosted state is active. The release
+        // scalars below are calibrated against the Supersonic canon trace until
+        // the exact GDP `playerIsFallingBugged` side state is recovered.
+        v52 = ship_v52(false, falling_bugged);
     }
 
     player.vy +=
         -v51 * float_c * SUBSTEP_TO_FRAME * VERTICAL_SLOW * flip_mod * v52 / v16;
+    update_ship_rotation(player);
+}
+
+const SHIP_HOLD_FALLING_V52: f32 = 0.5376;
+const SHIP_HOLD_RISING_V52: f32 = 0.3902;
+const SHIP_RELEASE_FALLING_V52: f32 = 0.3978;
+const SHIP_RELEASE_RISING_V52: f32 = 0.3422;
+
+fn ship_v52(pressed: bool, falling_bugged: bool) -> f32 {
+    match (pressed, falling_bugged) {
+        (true, true) => SHIP_HOLD_FALLING_V52,
+        (true, false) => SHIP_HOLD_RISING_V52,
+        (false, true) => SHIP_RELEASE_FALLING_V52,
+        (false, false) => SHIP_RELEASE_RISING_V52,
+    }
 }
 
 fn opengd_flyer_player_size(player: &PlayerState) -> f32 {
     if player.mini { 0.85 } else { 1.0 }
+}
+
+fn ship_player_is_falling_bugged(player: &PlayerState) -> bool {
+    // Closest available canon predicate (OpenGD `playerIsFalling()`):
+    // normal gravity => vy < gravity
+    // flipped gravity => vy > gravity
+    if player.gravity_sign > 0.0 {
+        player.vy > player.gravity
+    } else {
+        player.vy < player.gravity
+    }
+}
+
+fn update_ship_rotation(player: &mut PlayerState) {
+    if player.on_slope || player.dash_rotation_blocks_remaining > 0.0 {
+        return;
+    }
+    let dx = player.vx * SUBSTEP_TO_FRAME * player.player_speed;
+    let dy = player.vy * SUBSTEP_TO_FRAME * VERTICAL_SLOW;
+    if dx * dx + dy * dy < 1e-4 {
+        return;
+    }
+    let mut target = dy.atan2(dx).to_degrees();
+    if player.mini {
+        target *= 1.2;
+    }
+    let mut delta = target - player.rotation;
+    while delta > 180.0 {
+        delta -= 360.0;
+    }
+    while delta < -180.0 {
+        delta += 360.0;
+    }
+    player.rotation += delta * 0.15;
+    player.rotation = normalize_rotation_deg(player.rotation);
 }
 
 fn clamp_opengd_flyer_y_velocity(player: &mut PlayerState) {

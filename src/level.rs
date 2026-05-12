@@ -142,8 +142,8 @@ pub fn classify_object(object_id: u32, hitbox: Option<HitboxData>) -> ObjectKind
         // 678/679/680 hazard cores but extend slightly further; they kill on
         // contact too, so they're hazards, not solids the player can stand on.
         8 | 39 | 103 | 177 | 178 | 179 | 184 | 185 | 186 | 216 | 217 | 218 | 219 | 220 | 392
-        | 421 | 446 | 447 | 458 | 459 | 460 | 461 | 577 | 678 | 679 | 680 | 1705 | 1706 | 1707
-        | 1715 | 1717 | 1720 | 1722 => ObjectKind::Hazard,
+        | 421 | 446 | 447 | 458 | 459 | 460 | 461 | 577 | 678 | 679 | 680 | 740 | 741 | 742
+        | 1705 | 1706 | 1707 | 1715 | 1717 | 1720 | 1722 => ObjectKind::Hazard,
         _ => match hitbox {
             Some(HitboxData::Slope { .. }) => ObjectKind::Slope,
             Some(_) => ObjectKind::Solid,
@@ -221,4 +221,21 @@ fn groups_prop(value: Option<&String>) -> Vec<u32> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blade_objects_are_hazards_not_solids() {
+        let box_hitbox = Some(HitboxData::Box {
+            offset: [0.0, 0.0],
+            half_extents: [15.0, 15.0],
+        });
+
+        assert_eq!(classify_object(740, box_hitbox), ObjectKind::Hazard);
+        assert_eq!(classify_object(741, box_hitbox), ObjectKind::Hazard);
+        assert_eq!(classify_object(742, box_hitbox), ObjectKind::Hazard);
+    }
 }

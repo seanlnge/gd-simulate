@@ -169,6 +169,37 @@ pub struct SimulationRun {
     pub trace: Vec<TraceFrame>,
 }
 
+fn starting_mode_from_header(level: &Level) -> GameMode {
+    match level
+        .header
+        .get("kA2")
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        Some(1) => GameMode::Ship,
+        Some(2) => GameMode::Ball,
+        Some(3) => GameMode::Ufo,
+        Some(4) => GameMode::Wave,
+        Some(5) => GameMode::Robot,
+        Some(6) => GameMode::Spider,
+        Some(7) => GameMode::Swing,
+        _ => GameMode::Cube,
+    }
+}
+
+fn starting_player_speed_from_header(level: &Level) -> f32 {
+    match level
+        .header
+        .get("kA4")
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        Some(1) => crate::consts::PLAYER_SPEED_0_5X,
+        Some(2) => crate::consts::PLAYER_SPEED_2X,
+        Some(3) => crate::consts::PLAYER_SPEED_3X,
+        Some(4) => crate::consts::PLAYER_SPEED_4X,
+        _ => crate::consts::PLAYER_SPEED_1X,
+    }
+}
+
 pub fn simulate(
     level: &Level,
     clicks: &ClickTape,
@@ -184,16 +215,17 @@ pub fn simulate_with_trace(
 ) -> SimResult<SimulationRun> {
     reject_unsupported(level)?;
 
-    let speed_profile = SpeedProfile::for_player_speed(crate::consts::START_PLAYER_SPEED);
+    let starting_player_speed = starting_player_speed_from_header(level);
+    let speed_profile = SpeedProfile::for_player_speed(starting_player_speed);
     let initial = PlayerState {
         x: -15.0,
         y: 105.0,
         vx: speed_profile.speed_multiplier,
         vy: 0.0,
-        mode: GameMode::Cube,
+        mode: starting_mode_from_header(level),
         gravity_sign: -1.0,
         mini: false,
-        player_speed: crate::consts::START_PLAYER_SPEED,
+        player_speed: starting_player_speed,
         speed_multiplier: speed_profile.speed_multiplier,
         gravity: speed_profile.gravity,
         y_start: speed_profile.y_start,
@@ -495,6 +527,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_ka2_ship_start_sets_initial_mode_to_ship() {
+        let mut header = HashMap::new();
+        header.insert("kA2".to_owned(), "1".to_owned());
+        let level = Level {
+            header,
+            objects: vec![],
+        };
+        let clicks = ClickTape::from_bits("").unwrap();
+        let run = simulate_with_trace(&level, &clicks, SimulationConfig { max_ticks: 1 }).unwrap();
+        assert_eq!(run.trace[0].state.mode, GameMode::Ship);
+    }
+
+    #[test]
+    fn header_ka2_invalid_value_falls_back_to_cube() {
+        let mut header = HashMap::new();
+        header.insert("kA2".to_owned(), "not_a_number".to_owned());
+        let level = Level {
+            header,
+            objects: vec![],
+        };
+        let clicks = ClickTape::from_bits("").unwrap();
+        let run = simulate_with_trace(&level, &clicks, SimulationConfig { max_ticks: 1 }).unwrap();
+        assert_eq!(run.trace[0].state.mode, GameMode::Cube);
+    }
+
+    #[test]
+    fn header_ka4_start_speed_sets_initial_speed_profile() {
+        let mut header = HashMap::new();
+        header.insert("kA4".to_owned(), "2".to_owned());
+        let level = Level {
+            header,
+            objects: vec![],
+        };
+        let clicks = ClickTape::from_bits("").unwrap();
+        let run = simulate_with_trace(&level, &clicks, SimulationConfig { max_ticks: 1 }).unwrap();
+
+        assert!((run.trace[0].state.player_speed - crate::consts::PLAYER_SPEED_2X).abs() < 0.0001);
+        assert!((run.trace[0].state.speed_multiplier - 5.870002).abs() < 0.0001);
+    }
+
+    #[test]
     fn cube_gravity_is_scaled_to_240hz_substep() {
         let mut player = PlayerState {
             x: 0.0,
@@ -586,9 +659,11 @@ mod tests {
 
         let flip_mod = player.flip_mod();
         update_ship(&mut player, true, flip_mod);
-        // Pressed, !is_accelerating: v51 = -1.0, float_c = usedGravity
-        // (= 0.9582, no flip override applies because gravity_mod = 1).
-        let expected_hold = -(-1.0) * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * 0.4 / 1.0;
+        // Pressed, !is_accelerating:
+        // v51 = -1.0, float_c = usedGravity, v52 depends on falling-bugged.
+        // At vy=0 in normal gravity, ship_player_is_falling_bugged() is true.
+        let expected_hold =
+            -(-1.0) * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * SHIP_HOLD_FALLING_V52 / 1.0;
         assert!(
             (player.vy - expected_hold).abs() < 0.0001,
             "pressed-thrust should add {expected_hold}, got {}",
@@ -597,11 +672,11 @@ mod tests {
 
         player.vy = 0.0;
         update_ship(&mut player, false, flip_mod);
-        // Released, !is_accelerating: v51 = 1.2, float_c =
-        // usedGravity * gravity_mod = 0.9582 (gravity_mod = 1 in
-        // normal gravity).
+        // Released, !is_accelerating at vy=0:
+        // falling-bugged=true => v51=0.8, then GDP's released
+        // non-platformer/non-accelerating branch forces the release scalar.
         let expected_release_falling =
-            -1.2 * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * 0.4 / 1.0;
+            -0.8 * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * SHIP_RELEASE_FALLING_V52 / 1.0;
         assert!(
             (player.vy - expected_release_falling).abs() < 0.0001,
             "release should add {expected_release_falling}, got {}",
@@ -610,11 +685,11 @@ mod tests {
 
         player.vy = 2.0;
         update_ship(&mut player, false, flip_mod);
-        // Released, !is_accelerating, vy > 0 (rising): same v51 = 1.2
-        // path - GDP does not branch on vy direction outside the
-        // `is_accelerating` gate.
-        let expected_release_rising =
-            2.0 + (-1.2 * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * 0.4 / 1.0);
+        // Released, !is_accelerating, vy > gravity (rising): falling-bugged
+        // is false in normal gravity, so v51=1.2 and the release-rising scalar applies.
+        let expected_release_rising = 2.0
+            + (-1.2 * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * SHIP_RELEASE_RISING_V52
+                / 1.0);
         assert!(
             (player.vy - expected_release_rising).abs() < 0.0001,
             "rising release should yield {expected_release_rising}, got {}",
@@ -634,9 +709,12 @@ mod tests {
 
         let flip_mod = player.flip_mod();
         update_ship(&mut player, true, flip_mod);
-        // Same GDP path as above with v16 = 0.85 (mini-ship flyer
-        // override at `updateJump.cpp` lines 128-130) and v52 = 0.4.
-        let expected_hold = -(-1.0) * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * 0.4 / 0.85;
+        // Same path as above with v16 = 0.85 (mini-ship flyer override
+        // at `updateJump.cpp` lines 128-130). At vy=0 in normal gravity,
+        // falling-bugged=true so the hold-falling scalar applies.
+        let expected_hold =
+            -(-1.0) * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * 1.0 * SHIP_HOLD_FALLING_V52
+                / 0.85;
         assert!(
             (player.vy - expected_hold).abs() < 0.0001,
             "mini ship should use v16=0.85; got {} (expected {expected_hold})",
@@ -660,6 +738,32 @@ mod tests {
             (player.vy - 8.0).abs() < 0.0001,
             "normal-gravity ship upper clamp should be 8.0, got {}",
             player.vy
+        );
+    }
+
+    #[test]
+    fn ship_flipped_gravity_release_accelerates_upward() {
+        let mut player = test_player_state();
+        player.mode = GameMode::Ship;
+        player.on_ground = false;
+        player.is_accelerating = false;
+        player.gravity_sign = 1.0;
+        player.vy = 0.5;
+
+        let before = player.vy;
+        let flip_mod = player.flip_mod();
+        update_ship(&mut player, false, flip_mod);
+
+        // Flipped gravity should make released ship gravity accelerate upward
+        // (positive Y in our world coordinates). With vy=0.5 and gravity=0.9582,
+        // falling-bugged=false => v51=1.2 and the release-rising scalar applies.
+        let expected_delta =
+            -1.2 * 0.9582 * SUBSTEP_TO_FRAME * VERTICAL_SLOW * -1.0 * SHIP_RELEASE_RISING_V52 / 1.0;
+        assert!(
+            (player.vy - (before + expected_delta)).abs() < 0.0001,
+            "flipped gravity release should accelerate upward, got {} expected {}",
+            player.vy,
+            before + expected_delta
         );
     }
 
@@ -1475,6 +1579,32 @@ mod tests {
         assert!(!side_hit_is_lethal(block, player, 15.0, false, false, 1));
         player.slope_contact_cooldown = 0;
         assert!(side_hit_is_lethal(block, player, 15.0, false, false, 0));
+    }
+
+    #[test]
+    fn ship_side_hit_uses_rotated_inner_hitbox() {
+        let mut player = test_player_state();
+        player.mode = GameMode::Ship;
+        player.on_ground = false;
+        player.x = 0.0;
+        player.y = 0.0;
+        // 45deg ship: rotated inner square reaches farther on X than
+        // the axis-aligned half (4.5).
+        player.rotation = 45.0;
+        let probe = Rect {
+            center: [5.6, 0.0],
+            half_extents: [0.2, 0.2],
+        };
+        assert!(
+            side_hit_is_lethal(probe, player, 15.0, false, false, 0),
+            "rotated ship inner hitbox should intersect this probe"
+        );
+
+        player.rotation = 0.0;
+        assert!(
+            !side_hit_is_lethal(probe, player, 15.0, false, false, 0),
+            "unrotated ship inner hitbox should miss this probe"
+        );
     }
 
     #[test]

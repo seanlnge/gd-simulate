@@ -64,6 +64,9 @@ struct Args {
     /// Open a simple debug window showing path + hitboxes.
     #[arg(long)]
     visualize: bool,
+    /// DEV ONLY: overlay canonical tick log CSV in visualizer.
+    #[arg(long, hide = true, requires = "visualize")]
+    dev_canon_ticklog_csv: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -215,7 +218,12 @@ fn main() -> anyhow::Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&run.outcome)?);
             if args.visualize {
-                launch_visualizer(&level, &run.trace)?;
+                let canon_trace = if let Some(path) = args.dev_canon_ticklog_csv.as_ref() {
+                    Some(read_canon_ticklog_csv(path)?)
+                } else {
+                    None
+                };
+                launch_visualizer(&level, &run.trace, canon_trace.as_deref())?;
             }
         }
         (Err(error), UnsupportedPolicy::Report) => println!(
@@ -229,6 +237,45 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanonTracePoint {
+    tick: usize,
+    x: f32,
+    y: f32,
+}
+
+fn read_canon_ticklog_csv(path: &PathBuf) -> anyhow::Result<Vec<CanonTracePoint>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for (line_idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("tick,") {
+            continue;
+        }
+        let cols: Vec<&str> = trimmed.split(',').collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        let tick = cols[0]
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| anyhow::anyhow!("invalid tick at line {}: {}", line_idx + 1, e))?;
+        let x = cols[1]
+            .trim()
+            .parse::<f32>()
+            .map_err(|e| anyhow::anyhow!("invalid x at line {}: {}", line_idx + 1, e))?;
+        let y_text = cols[2].trim();
+        if y_text.eq_ignore_ascii_case("nan") {
+            continue;
+        }
+        let y = y_text
+            .parse::<f32>()
+            .map_err(|e| anyhow::anyhow!("invalid y at line {}: {}", line_idx + 1, e))?;
+        out.push(CanonTracePoint { tick, x, y });
+    }
+    Ok(out)
 }
 
 fn read_levelstring_file(path: &PathBuf) -> anyhow::Result<String> {
@@ -354,6 +401,7 @@ const SETTINGS_PANEL_PAD: i32 = 6;
 const HITBOX_MAIN_COLOR: u32 = CUBE_COLOR;
 const HITBOX_ROTATED_COLOR: u32 = 0x66CCFF;
 const HITBOX_CORE_COLOR: u32 = 0xFFAA44;
+const CANON_PATH_COLOR: u32 = 0xFF66CC;
 const HITBOX_CURRENT_ALPHA: f32 = 0.90;
 const VIEW_HEIGHT_BLOCKS: f32 = 20.0;
 const BLOCK_SIZE: f32 = 30.0;
@@ -381,6 +429,8 @@ struct VizState {
     show_rotated_hitbox: bool,
     show_core_hitbox: bool,
     show_trail: bool,
+    show_canon_trace: bool,
+    has_canon_trace: bool,
     show_settings_panel: bool,
     follow_cube: bool,
     current_tick: usize,
@@ -483,7 +533,11 @@ fn compute_layout(
     }
 }
 
-fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> anyhow::Result<()> {
+fn launch_visualizer(
+    level: &Level,
+    trace: &[gd_real_sim::sim::TraceFrame],
+    canon_trace: Option<&[CanonTracePoint]>,
+) -> anyhow::Result<()> {
     if trace.is_empty() {
         return Ok(());
     }
@@ -506,7 +560,7 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
     );
 
     let mut buffer = vec![BG_COLOR; width * height];
-    let scene = scene_bounds(level, trace);
+    let scene = scene_bounds(level, trace, canon_trace);
     let mut state = VizState {
         scroll_x: scene.min_x,
         scroll_y: 0.0,
@@ -519,6 +573,8 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
         show_rotated_hitbox: false,
         show_core_hitbox: false,
         show_trail: true,
+        show_canon_trace: canon_trace.is_some(),
+        has_canon_trace: canon_trace.is_some(),
         show_settings_panel: false,
         follow_cube: false,
         current_tick: trace.len() - 1,
@@ -609,7 +665,7 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
                     state.show_settings_panel = !state.show_settings_panel;
                     consumed_left_click = true;
                 } else if state.show_settings_panel
-                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my)
+                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my, &state)
                 {
                     match toggle {
                         SettingsToggle::MainHitbox => {
@@ -635,6 +691,9 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
                         }
                         SettingsToggle::ModeBar => {
                             state.show_mode = !state.show_mode;
+                        }
+                        SettingsToggle::CanonTrace => {
+                            state.show_canon_trace = !state.show_canon_trace;
                         }
                     }
                     consumed_left_click = true;
@@ -689,7 +748,14 @@ fn launch_visualizer(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> a
 
         // ---- render ----
         let visible_trace = &trace[..=state.current_tick];
-        render_scene(&mut buffer, &viewport, level, visible_trace, &state);
+        render_scene(
+            &mut buffer,
+            &viewport,
+            level,
+            visible_trace,
+            canon_trace,
+            &state,
+        );
         if state.show_clicks {
             draw_press_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
         }
@@ -728,7 +794,11 @@ fn base_scale(_height: usize, layout: &Layout) -> f32 {
     (plot_height / (VIEW_HEIGHT_BLOCKS * BLOCK_SIZE)).max(0.01)
 }
 
-fn scene_bounds(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> SceneBounds {
+fn scene_bounds(
+    level: &Level,
+    trace: &[gd_real_sim::sim::TraceFrame],
+    canon_trace: Option<&[CanonTracePoint]>,
+) -> SceneBounds {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -754,6 +824,11 @@ fn scene_bounds(level: &Level, trace: &[gd_real_sim::sim::TraceFrame]) -> SceneB
             let ph = player_half(partner.mini);
             include(partner.x - ph, partner.y - ph);
             include(partner.x + ph, partner.y + ph);
+        }
+    }
+    if let Some(canon) = canon_trace {
+        for point in canon {
+            include(point.x, point.y);
         }
     }
 
@@ -806,6 +881,7 @@ fn render_scene(
     viewport: &Viewport,
     level: &Level,
     trace: &[gd_real_sim::sim::TraceFrame],
+    canon_trace: Option<&[CanonTracePoint]>,
     state: &VizState,
 ) {
     buffer.fill(BG_COLOR);
@@ -842,6 +918,11 @@ fn render_scene(
             draw_line_world(buffer, viewport, pa.x, pa.y, pb.x, pb.y, PARTNER_PATH_COLOR);
         }
     }
+    if state.show_canon_trace {
+        if let Some(canon) = canon_trace {
+            draw_canon_trace(buffer, viewport, canon, state.current_tick);
+        }
+    }
 
     if state.show_trail {
         let step = (trace.len() / 800).max(1);
@@ -855,6 +936,21 @@ fn render_scene(
 
     // Bars (press / vy / scrubber) are drawn by `launch_visualizer` after
     // `render_scene` so they sit on top of everything regardless of state.
+}
+
+fn draw_canon_trace(
+    buffer: &mut [u32],
+    viewport: &Viewport,
+    canon: &[CanonTracePoint],
+    current_tick: usize,
+) {
+    let mut prev: Option<(f32, f32)> = None;
+    for point in canon.iter().copied().filter(|p| p.tick <= current_tick) {
+        if let Some((px, py)) = prev {
+            draw_line_world(buffer, viewport, px, py, point.x, point.y, CANON_PATH_COLOR);
+        }
+        prev = Some((point.x, point.y));
+    }
 }
 
 fn draw_object_hitbox(
@@ -1375,6 +1471,7 @@ enum SettingsToggle {
     VelocityBar,
     SpeedBar,
     ModeBar,
+    CanonTrace,
 }
 
 struct SettingsRow {
@@ -1390,11 +1487,11 @@ fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &Vi
     if !state.show_settings_panel {
         return;
     }
-    let (px, py, pw, ph) = settings_panel_rect(width);
+    let rows = settings_rows(state);
+    let (px, py, pw, ph) = settings_panel_rect(width, rows.len());
     fill_rect(buffer, width, px, py, pw, ph, SETTINGS_PANEL_BG);
     draw_rect_border(buffer, width, px, py, pw, ph, SETTINGS_BTN_BORDER);
-    let rows = settings_rows(state);
-    for (i, row) in rows.iter().enumerate() {
+    for (i, (_, row)) in rows.iter().enumerate() {
         let ry =
             py + SETTINGS_PANEL_PAD + i as i32 * (SETTINGS_PANEL_ROW_H + SETTINGS_PANEL_ROW_GAP);
         let row_bg = if row.on {
@@ -1439,45 +1536,75 @@ fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &Vi
     }
 }
 
-fn settings_rows_len() -> usize {
-    8
-}
-
-fn settings_rows(state: &VizState) -> [SettingsRow; 8] {
-    [
-        SettingsRow {
-            glyph: 'M',
-            on: state.show_main_hitbox,
-        },
-        SettingsRow {
-            glyph: 'R',
-            on: state.show_rotated_hitbox,
-        },
-        SettingsRow {
-            glyph: 'I',
-            on: state.show_core_hitbox,
-        },
-        SettingsRow {
-            glyph: 'T',
-            on: state.show_trail,
-        },
-        SettingsRow {
-            glyph: 'C',
-            on: state.show_clicks,
-        },
-        SettingsRow {
-            glyph: 'V',
-            on: state.show_vy,
-        },
-        SettingsRow {
-            glyph: 'P',
-            on: state.show_speed,
-        },
-        SettingsRow {
-            glyph: 'G',
-            on: state.show_mode,
-        },
-    ]
+fn settings_rows(state: &VizState) -> Vec<(SettingsToggle, SettingsRow)> {
+    let mut rows = vec![
+        (
+            SettingsToggle::MainHitbox,
+            SettingsRow {
+                glyph: 'M',
+                on: state.show_main_hitbox,
+            },
+        ),
+        (
+            SettingsToggle::RotatedHitbox,
+            SettingsRow {
+                glyph: 'R',
+                on: state.show_rotated_hitbox,
+            },
+        ),
+        (
+            SettingsToggle::CoreHitbox,
+            SettingsRow {
+                glyph: 'I',
+                on: state.show_core_hitbox,
+            },
+        ),
+        (
+            SettingsToggle::Trail,
+            SettingsRow {
+                glyph: 'T',
+                on: state.show_trail,
+            },
+        ),
+        (
+            SettingsToggle::ClickBar,
+            SettingsRow {
+                glyph: 'C',
+                on: state.show_clicks,
+            },
+        ),
+        (
+            SettingsToggle::VelocityBar,
+            SettingsRow {
+                glyph: 'V',
+                on: state.show_vy,
+            },
+        ),
+        (
+            SettingsToggle::SpeedBar,
+            SettingsRow {
+                glyph: 'P',
+                on: state.show_speed,
+            },
+        ),
+        (
+            SettingsToggle::ModeBar,
+            SettingsRow {
+                glyph: 'G',
+                on: state.show_mode,
+            },
+        ),
+    ];
+    if state.has_canon_trace {
+        rows.push((
+            SettingsToggle::CanonTrace,
+            SettingsRow {
+                glyph: 'N',
+                on: state.show_canon_trace,
+            },
+        ));
+    }
+    rows
 }
 
 fn settings_button_rect(width: usize) -> (i32, i32, i32, i32) {
@@ -1486,8 +1613,8 @@ fn settings_button_rect(width: usize) -> (i32, i32, i32, i32) {
     (x, y, SETTINGS_BTN_SIZE, SETTINGS_BTN_SIZE)
 }
 
-fn settings_panel_rect(width: usize) -> (i32, i32, i32, i32) {
-    let rows = settings_rows_len() as i32;
+fn settings_panel_rect(width: usize, row_count: usize) -> (i32, i32, i32, i32) {
+    let rows = row_count as i32;
     let panel_h =
         SETTINGS_PANEL_PAD * 2 + rows * SETTINGS_PANEL_ROW_H + (rows - 1) * SETTINGS_PANEL_ROW_GAP;
     let (bx, by, _, bh) = settings_button_rect(width);
@@ -1496,12 +1623,18 @@ fn settings_panel_rect(width: usize) -> (i32, i32, i32, i32) {
     (x, y, SETTINGS_PANEL_WIDTH, panel_h)
 }
 
-fn settings_panel_toggle_at(width: usize, mx: f32, my: f32) -> Option<SettingsToggle> {
-    let (px, py, pw, ph) = settings_panel_rect(width);
+fn settings_panel_toggle_at(
+    width: usize,
+    mx: f32,
+    my: f32,
+    state: &VizState,
+) -> Option<SettingsToggle> {
+    let rows = settings_rows(state);
+    let (px, py, pw, ph) = settings_panel_rect(width, rows.len());
     if !point_in_rect(mx, my, (px, py, pw, ph)) {
         return None;
     }
-    for i in 0..settings_rows_len() {
+    for i in 0..rows.len() {
         let ry =
             py + SETTINGS_PANEL_PAD + i as i32 * (SETTINGS_PANEL_ROW_H + SETTINGS_PANEL_ROW_GAP);
         let row_rect = (
@@ -1511,16 +1644,7 @@ fn settings_panel_toggle_at(width: usize, mx: f32, my: f32) -> Option<SettingsTo
             SETTINGS_PANEL_ROW_H,
         );
         if point_in_rect(mx, my, row_rect) {
-            return Some(match i {
-                0 => SettingsToggle::MainHitbox,
-                1 => SettingsToggle::RotatedHitbox,
-                2 => SettingsToggle::CoreHitbox,
-                3 => SettingsToggle::Trail,
-                4 => SettingsToggle::ClickBar,
-                5 => SettingsToggle::VelocityBar,
-                6 => SettingsToggle::SpeedBar,
-                _ => SettingsToggle::ModeBar,
-            });
+            return Some(rows[i].0);
         }
     }
     None
@@ -1596,6 +1720,11 @@ fn draw_toggle_glyph(buffer: &mut [u32], width: usize, x: i32, y: i32, glyph: ch
             draw_v_line(buffer, width, x, y, y + 10, color);
             draw_h_line(buffer, width, x + 4, x + 8, y + 6, color);
             draw_v_line(buffer, width, x + 8, y + 6, y + 10, color);
+        }
+        'N' => {
+            draw_v_line(buffer, width, x, y, y + 10, color);
+            draw_v_line(buffer, width, x + 8, y, y + 10, color);
+            stroke_segment(buffer, width, x, y, x + 8, y + 10, color);
         }
         '1' => {
             draw_v_line(buffer, width, x + 4, y, y + 10, color);

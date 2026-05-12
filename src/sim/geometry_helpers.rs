@@ -245,7 +245,66 @@ fn side_hit_is_lethal(
     if slope_contact_cooldown > 0 || player.on_ground && (on_slope_this_tick || was_on_slope) {
         return false;
     }
-    intersects_box_player(rect, player, cube_lethal_inner_half(&player))
+    let inner_half = cube_lethal_inner_half(&player);
+    if player.mode == GameMode::Ship {
+        return intersects_rotated_player_inner(rect, player, inner_half);
+    }
+    intersects_box_player(rect, player, inner_half)
+}
+
+fn intersects_rotated_player_inner(rect: Rect, player: PlayerState, inner_half: f32) -> bool {
+    let theta = player.rotation.to_radians();
+    let (s, c) = (theta.sin(), theta.cos());
+    let local = [
+        (-inner_half, -inner_half),
+        (inner_half, -inner_half),
+        (inner_half, inner_half),
+        (-inner_half, inner_half),
+    ];
+    let mut player_corners = [(0.0_f32, 0.0_f32); 4];
+    for (i, (x, y)) in local.into_iter().enumerate() {
+        player_corners[i] = (player.x + x * c - y * s, player.y + x * s + y * c);
+    }
+    let rect_corners = [
+        (
+            rect.center[0] - rect.half_extents[0],
+            rect.center[1] - rect.half_extents[1],
+        ),
+        (
+            rect.center[0] + rect.half_extents[0],
+            rect.center[1] - rect.half_extents[1],
+        ),
+        (
+            rect.center[0] + rect.half_extents[0],
+            rect.center[1] + rect.half_extents[1],
+        ),
+        (
+            rect.center[0] - rect.half_extents[0],
+            rect.center[1] + rect.half_extents[1],
+        ),
+    ];
+
+    let mut axes = Vec::with_capacity(4);
+    axes.push((1.0_f32, 0.0_f32));
+    axes.push((0.0_f32, 1.0_f32));
+    for i in 0..2 {
+        let (x1, y1) = player_corners[i];
+        let (x2, y2) = player_corners[(i + 1) % 4];
+        let axis = (-(y2 - y1), x2 - x1);
+        let len_sq = axis.0 * axis.0 + axis.1 * axis.1;
+        if len_sq > 1e-8 {
+            let inv = len_sq.sqrt().recip();
+            axes.push((axis.0 * inv, axis.1 * inv));
+        }
+    }
+    for axis in axes {
+        let (rmin, rmax) = project_points(axis, &rect_corners);
+        let (pmin, pmax) = project_points(axis, &player_corners);
+        if rmax < pmin || pmax < rmin {
+            return false;
+        }
+    }
+    true
 }
 
 fn cube_lethal_inner_half(player: &PlayerState) -> f32 {

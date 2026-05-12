@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -114,6 +115,7 @@ void print_usage(const char* exe) {
         << "                          sample 0 aligns with tick 0 at x = -1.\n"
         << "  --min-step <float>     Min per-tick dx that arms trigger (default 0.5)\n"
         << "  --max-step <float>     Max per-tick dx that counts as a normal step (default 7.0)\n"
+        << "  --tick-log <path.csv>  Optional per-sample log: tick,x,y,click,source\n"
         << "\n"
         << "Example:\n"
         << "  " << exe << " pop.bin --duration 90 \\\n"
@@ -211,6 +213,8 @@ int main(int argc, const char* argv[]) {
     double      x_trigger_max   = DEFAULT_X_TRIGGER_MAX;
     double      min_step        = DEFAULT_MIN_STEP;
     double      max_step        = DEFAULT_MAX_STEP;
+    std::string tick_log_path;
+    bool        write_tick_log  = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string flag = argv[i];
@@ -228,6 +232,7 @@ int main(int argc, const char* argv[]) {
         else if (flag == "--x-trigger-max")  { if (!parse_double(need_value("--x-trigger-max"), x_trigger_max) || x_trigger_max <= 0) { std::cerr << "Invalid --x-trigger-max\n"; return 1; } }
         else if (flag == "--min-step")       { if (!parse_double(need_value("--min-step"), min_step))          { std::cerr << "Invalid --min-step\n"; return 1; } }
         else if (flag == "--max-step")       { if (!parse_double(need_value("--max-step"), max_step))          { std::cerr << "Invalid --max-step\n"; return 1; } }
+        else if (flag == "--tick-log")       { tick_log_path = need_value("--tick-log"); write_tick_log = true; }
         else if (flag == "--help" || flag == "-h") { print_usage(argv[0]); return 0; }
         else {
             std::cerr << "Unknown argument: " << flag << "\n";
@@ -273,20 +278,19 @@ int main(int argc, const char* argv[]) {
               << " AND dx in [" << min_step << ", " << max_step << "] px/tick.\n"
               << "  Leading 0-bits will be synthesized so sample 0 == tick 0 at x = "
               << FIRST_TICK_X << ".\n";
+    if (write_tick_log) {
+        std::cout << "Tick log: " << tick_log_path << "\n";
+    }
     std::cout << "Start the level - capture begins on the first 240Hz tick where the player moves.\n";
 
     using clock = std::chrono::steady_clock;
-    constexpr int64_t NS_PER_SEC = 1'000'000'000LL;
-    const auto tick_offset = [hz](int64_t tick_index) -> std::chrono::nanoseconds {
+    const auto tick_time = [hz](clock::time_point base, int64_t tick_index) -> clock::time_point {
         // Use absolute rational-time mapping instead of fixed integer step_ns so
         // rates like 240Hz stay phase-accurate over long captures.
         const long double ns =
-            (static_cast<long double>(tick_index) * static_cast<long double>(NS_PER_SEC)) /
+            (static_cast<long double>(tick_index) * 1'000'000'000.0L) /
             static_cast<long double>(hz);
-        return std::chrono::nanoseconds(static_cast<int64_t>(std::floor(ns)));
-    };
-    const auto tick_time = [&tick_offset](clock::time_point base, int64_t tick_index) -> clock::time_point {
-        return base + tick_offset(tick_index);
+        return base + std::chrono::nanoseconds(static_cast<int64_t>(std::floor(ns)));
     };
 
     // -------- Phase 1: catch the first in-band forward step near x=0. --------
@@ -365,6 +369,25 @@ int main(int argc, const char* argv[]) {
     // -------- Phase 2: 240Hz spacebar capture. --------
     const int64_t total_samples = static_cast<int64_t>(hz) * duration_s;
     BitBuffer bits;
+    std::ofstream tick_log;
+    if (write_tick_log) {
+        tick_log.open(tick_log_path, std::ios::out | std::ios::trunc);
+        if (!tick_log.is_open()) {
+            std::cerr << "Could not open tick log file: " << tick_log_path << "\n";
+            timeEndPeriod(1);
+            return 2;
+        }
+        tick_log << "tick,x,y,click,source\n";
+        tick_log << std::fixed << std::setprecision(6);
+    }
+    const auto write_tick_row = [&](int64_t tick, float x, float y, int click, const char* source) {
+        if (!write_tick_log) return;
+        tick_log << tick << ",";
+        if (std::isfinite(x)) tick_log << x; else tick_log << "nan";
+        tick_log << ",";
+        if (std::isfinite(y)) tick_log << y; else tick_log << "nan";
+        tick_log << "," << click << "," << source << "\n";
+    };
 
     int64_t  sample_index = 0;
     int      last_bit     = 0;
@@ -389,15 +412,28 @@ int main(int argc, const char* argv[]) {
     // not clicking). Cap at total_samples just in case.
     for (int i = 0; i < pad_ticks && sample_index < total_samples; ++i) {
         bits.push(0);
+        // Estimated x for synthetic pre-roll ticks; y is unknown here.
+        const float est_x = static_cast<float>(FIRST_TICK_X + static_cast<double>(i) * trigger_dx);
+        write_tick_row(sample_index, est_x, std::numeric_limits<float>::quiet_NaN(), 0, "synthetic_pad");
         ++sample_index;
     }
     last_bit = 0;
 
     // Capture the trigger tick itself (sample == pad_ticks) immediately.
     if (sample_index < total_samples) {
+        float x_now = read_coord(gd, use_direct_xy, x_addr, OFF_X);
+        float y_now = std::numeric_limits<float>::quiet_NaN();
+        if (use_direct_xy) {
+            if (has_y_addr) {
+                y_now = read_coord(gd, true, y_addr, OFF_Y);
+            }
+        } else {
+            y_now = read_coord(gd, false, 0, OFF_Y);
+        }
         const bool pressed = (GetAsyncKeyState(VK_SPACE_KEY) & 0x8000) != 0;
         last_bit = pressed ? 1 : 0;
         bits.push(last_bit);
+        write_tick_row(sample_index, x_now, y_now, last_bit, "captured");
         ++sample_index;
     }
 
@@ -445,14 +481,31 @@ int main(int argc, const char* argv[]) {
             missed_ticks_total += missed;
             for (int64_t i = 0; i < missed && sample_index < total_samples; ++i) {
                 bits.push(last_bit);
+                write_tick_row(
+                    sample_index,
+                    std::numeric_limits<float>::quiet_NaN(),
+                    std::numeric_limits<float>::quiet_NaN(),
+                    last_bit,
+                    "missed_repeat"
+                );
                 ++sample_index;
             }
             if (sample_index >= total_samples) break;
         }
 
+        float x_now = read_coord(gd, use_direct_xy, x_addr, OFF_X);
+        float y_now = std::numeric_limits<float>::quiet_NaN();
+        if (use_direct_xy) {
+            if (has_y_addr) {
+                y_now = read_coord(gd, true, y_addr, OFF_Y);
+            }
+        } else {
+            y_now = read_coord(gd, false, 0, OFF_Y);
+        }
         const bool pressed = (GetAsyncKeyState(VK_SPACE_KEY) & 0x8000) != 0;
         last_bit = pressed ? 1 : 0;
         bits.push(last_bit);
+        write_tick_row(sample_index, x_now, y_now, last_bit, "captured");
         ++sample_index;
     }
 
@@ -490,6 +543,10 @@ int main(int argc, const char* argv[]) {
               static_cast<std::streamsize>(bits.bytes().size()));
     out.flush();
     out.close();
+    if (write_tick_log) {
+        tick_log.flush();
+        tick_log.close();
+    }
 
     timeEndPeriod(1);
 
@@ -501,6 +558,9 @@ int main(int argc, const char* argv[]) {
     std::cout << "Missed events:   " << missed_events << "\n";
     std::cout << "Missed ticks:    " << missed_ticks_total << "\n";
     std::cout << "Output:          " << out_path << "\n";
+    if (write_tick_log) {
+        std::cout << "Tick log:        " << tick_log_path << "\n";
+    }
 
     return 0;
 }
