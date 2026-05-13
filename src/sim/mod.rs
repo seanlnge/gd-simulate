@@ -169,6 +169,26 @@ pub struct SimulationRun {
     pub trace: Vec<TraceFrame>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveStep {
+    pub frame: TraceFrame,
+    pub outcome: Option<SimulationOutcome>,
+}
+
+pub struct LiveSimulationSession<'a> {
+    level: &'a Level,
+    player: PlayerState,
+    partner: Option<PlayerState>,
+    touched_pads: HashSet<usize>,
+    touched_portals: HashSet<usize>,
+    touched_orbs: HashSet<(usize, u8)>,
+    touched_teleports: HashSet<usize>,
+    teleport_exits: Vec<&'a LevelObject>,
+    tick: usize,
+    click_tick: usize,
+    click_pattern_started: bool,
+}
+
 fn starting_mode_from_header(level: &Level) -> GameMode {
     match level
         .header
@@ -213,166 +233,13 @@ pub fn simulate_with_trace(
     clicks: &ClickTape,
     config: SimulationConfig,
 ) -> SimResult<SimulationRun> {
-    reject_unsupported(level)?;
-
-    let starting_player_speed = starting_player_speed_from_header(level);
-    let speed_profile = SpeedProfile::for_player_speed(starting_player_speed);
-    let initial = PlayerState {
-        x: -15.0,
-        y: 105.0,
-        vx: speed_profile.speed_multiplier,
-        vy: 0.0,
-        mode: starting_mode_from_header(level),
-        gravity_sign: -1.0,
-        mini: false,
-        player_speed: starting_player_speed,
-        speed_multiplier: speed_profile.speed_multiplier,
-        gravity: speed_profile.gravity,
-        y_start: speed_profile.y_start,
-        vehicle_size: 1.0,
-        on_ground: true,
-        was_jump_buffered: false,
-        jump_buffered: false,
-        state_ring_jump: false,
-        on_slope: false,
-        slope_exit_vy: 0.0,
-        slope_exit_vx: 0.0,
-        slope_contact_cooldown: 1,
-        slope_object: None,
-        slope_is_current_top: false,
-        slope_prev_radius: 15.0,
-        rotation: 0.0,
-        is_accelerating: false,
-        snapped_object: None,
-        snap_distance: 0.0,
-        dash_rotation_blocks_remaining: 0.0,
-        dash_angle_deg: 0.0,
-        hold_ticks: 0,
-        pending_yvel_next_tick: 0.0,
-    };
-
-    let mut player = initial;
-    let mut partner: Option<PlayerState> = None;
-
+    let mut session = LiveSimulationSession::new(level)?;
     let mut trace: Vec<TraceFrame> = Vec::new();
-    let mut touched_pads: HashSet<usize> = HashSet::new();
-    let mut touched_portals: HashSet<usize> = HashSet::new();
-    let mut touched_orbs: HashSet<(usize, u8)> = HashSet::new(); // (object_idx, which_player)
-    let mut touched_teleports: HashSet<usize> = HashSet::new();
-
-    // Precompute teleport portal pairs: entry (747) paired with nearest exit (749).
-    let teleport_exits: Vec<&LevelObject> = level
-        .objects
-        .iter()
-        .filter(|o| o.object_id == 749)
-        .collect();
-
-    let mut click_tick = 0usize;
-    let mut click_pattern_started = false;
-    for tick in 0..config.max_ticks {
-        let start_clicks_this_tick = if click_pattern_started {
-            true
-        } else {
-            // Start input on the tick where the cube reaches/crosses x=0,
-            // not one tick later. This keeps click timing aligned with
-            // traces captured against world-X thresholds.
-            let step_dx = player.vx * DT * TIME_TO_FRAMES * player.player_speed;
-            player.x >= 0.0 || player.x + step_dx >= 0.0
-        };
-        if start_clicks_this_tick {
-            click_pattern_started = true;
-        }
-        let pressed = if click_pattern_started {
-            let p = clicks.is_pressed(click_tick);
-            click_tick += 1;
-            p
-        } else {
-            false
-        };
-        refresh_ground_probe(level, &mut player);
-        step_player(&mut player, pressed);
-        if let Some(p2) = partner.as_mut() {
-            refresh_ground_probe(level, p2);
-            step_player(p2, pressed);
-        }
-
-        // Collision / portal / pad / orb handling for both players.
-        let old_x = player.x;
-        integrate_player_position(&mut player);
-        if let Some(p2) = partner.as_mut() {
-            integrate_player_position(p2);
-        }
-
-        // Portals (incl. mirror no-op), size, speed, gravity, teleport, dual.
-        let mut dual_activate = false;
-        let mut dual_deactivate = false;
-        apply_portals(
-            level,
-            &mut player,
-            &mut touched_portals,
-            &teleport_exits,
-            &mut touched_teleports,
-            &mut dual_activate,
-            &mut dual_deactivate,
-            0,
-        );
-        if let Some(p2) = partner.as_mut() {
-            apply_portals(
-                level,
-                p2,
-                &mut touched_portals,
-                &teleport_exits,
-                &mut touched_teleports,
-                &mut dual_activate,
-                &mut dual_deactivate,
-                1,
-            );
-        }
-        if dual_activate && partner.is_none() {
-            partner = Some(make_partner(&player));
-        }
-        if dual_deactivate {
-            partner = None;
-        }
-
-        // Pre-collision trigger pass for blue pads. In real GD, embedded
-        // gravity pads can fire before the enclosing block resolves.
-        apply_blue_pads_pre_collision(level, &mut player, &mut touched_pads, 0);
-        if let Some(p2) = partner.as_mut() {
-            apply_blue_pads_pre_collision(level, p2, &mut touched_pads, 1);
-        }
-
-        // Collisions first (mirrors gdp::collidedWithObjectInternal path for
-        // normal block landings and side-hit logic).
-        if let Some(outcome) = resolve_collisions(level, tick, &mut player, 0) {
-            trace.push(make_trace_frame(tick, pressed, player, partner));
-            return Ok(SimulationRun { outcome, trace });
-        }
-        if let Some(p2) = partner.as_mut() {
-            if let Some(outcome) = resolve_collisions(level, tick, p2, 1) {
-                trace.push(make_trace_frame(tick, pressed, player, Some(*p2)));
-                return Ok(SimulationRun { outcome, trace });
-            }
-        }
-
-        // Pads + orbs (touch / press-start activated). Run after collision so
-        // the floor under a pad doesn't clamp the impulse vy back to 0.
-        apply_pads(level, &mut player, &mut touched_pads, 0);
-        apply_orbs(level, &mut player, &mut touched_orbs, 0, pressed);
-        if let Some(p2) = partner.as_mut() {
-            apply_pads(level, p2, &mut touched_pads, 1);
-            apply_orbs(level, p2, &mut touched_orbs, 1, pressed);
-        }
-
-        trace.push(make_trace_frame(tick, pressed, player, partner));
-
-        // Completion check.
-        if end_reached(level, old_x, player.x) {
-            let outcome = SimulationOutcome::Completed {
-                tick,
-                time: tick as f32 / 240.0,
-                state: player,
-            };
+    for _ in 0..config.max_ticks {
+        let step = session.step_tape(clicks)?;
+        let outcome = step.outcome.clone();
+        trace.push(step.frame);
+        if let Some(outcome) = outcome {
             return Ok(SimulationRun { outcome, trace });
         }
     }
@@ -380,9 +247,195 @@ pub fn simulate_with_trace(
     let outcome = SimulationOutcome::Timeout {
         tick: config.max_ticks,
         time: config.max_ticks as f32 / 240.0,
-        state: player,
+        state: session.player_state(),
     };
     Ok(SimulationRun { outcome, trace })
+}
+
+impl<'a> LiveSimulationSession<'a> {
+    pub fn new(level: &'a Level) -> SimResult<Self> {
+        reject_unsupported(level)?;
+
+        let starting_player_speed = starting_player_speed_from_header(level);
+        let speed_profile = SpeedProfile::for_player_speed(starting_player_speed);
+        let player = PlayerState {
+            x: -15.0,
+            y: 105.0,
+            vx: speed_profile.speed_multiplier,
+            vy: 0.0,
+            mode: starting_mode_from_header(level),
+            gravity_sign: -1.0,
+            mini: false,
+            player_speed: starting_player_speed,
+            speed_multiplier: speed_profile.speed_multiplier,
+            gravity: speed_profile.gravity,
+            y_start: speed_profile.y_start,
+            vehicle_size: 1.0,
+            on_ground: true,
+            was_jump_buffered: false,
+            jump_buffered: false,
+            state_ring_jump: false,
+            on_slope: false,
+            slope_exit_vy: 0.0,
+            slope_exit_vx: 0.0,
+            slope_contact_cooldown: 1,
+            slope_object: None,
+            slope_is_current_top: false,
+            slope_prev_radius: 15.0,
+            rotation: 0.0,
+            is_accelerating: false,
+            snapped_object: None,
+            snap_distance: 0.0,
+            dash_rotation_blocks_remaining: 0.0,
+            dash_angle_deg: 0.0,
+            hold_ticks: 0,
+            pending_yvel_next_tick: 0.0,
+        };
+
+        let teleport_exits = level
+            .objects
+            .iter()
+            .filter(|o| o.object_id == 749)
+            .collect();
+
+        Ok(Self {
+            level,
+            player,
+            partner: None,
+            touched_pads: HashSet::new(),
+            touched_portals: HashSet::new(),
+            touched_orbs: HashSet::new(),
+            touched_teleports: HashSet::new(),
+            teleport_exits,
+            tick: 0,
+            click_tick: 0,
+            click_pattern_started: false,
+        })
+    }
+
+    pub fn player_state(&self) -> PlayerState {
+        self.player
+    }
+
+    pub fn tick(&self) -> usize {
+        self.tick
+    }
+
+    pub fn step_live(&mut self, held: bool) -> SimResult<LiveStep> {
+        let pressed = if self.start_input_this_tick() {
+            self.click_pattern_started = true;
+            held
+        } else {
+            false
+        };
+        self.step_resolved(pressed)
+    }
+
+    pub fn step_tape(&mut self, clicks: &ClickTape) -> SimResult<LiveStep> {
+        let pressed = if self.start_input_this_tick() {
+            self.click_pattern_started = true;
+            let pressed = clicks.is_pressed(self.click_tick);
+            self.click_tick += 1;
+            pressed
+        } else {
+            false
+        };
+        self.step_resolved(pressed)
+    }
+
+    fn start_input_this_tick(&self) -> bool {
+        if self.click_pattern_started {
+            return true;
+        }
+        let step_dx = self.player.vx * DT * TIME_TO_FRAMES * self.player.player_speed;
+        self.player.x >= 0.0 || self.player.x + step_dx >= 0.0
+    }
+
+    fn step_resolved(&mut self, pressed: bool) -> SimResult<LiveStep> {
+        let tick = self.tick;
+        refresh_ground_probe(self.level, &mut self.player);
+        step_player(&mut self.player, pressed);
+        if let Some(p2) = self.partner.as_mut() {
+            refresh_ground_probe(self.level, p2);
+            step_player(p2, pressed);
+        }
+
+        let old_x = self.player.x;
+        integrate_player_position(&mut self.player);
+        if let Some(p2) = self.partner.as_mut() {
+            integrate_player_position(p2);
+        }
+
+        let mut dual_activate = false;
+        let mut dual_deactivate = false;
+        apply_portals(
+            self.level,
+            &mut self.player,
+            &mut self.touched_portals,
+            &self.teleport_exits,
+            &mut self.touched_teleports,
+            &mut dual_activate,
+            &mut dual_deactivate,
+            0,
+        );
+        if let Some(p2) = self.partner.as_mut() {
+            apply_portals(
+                self.level,
+                p2,
+                &mut self.touched_portals,
+                &self.teleport_exits,
+                &mut self.touched_teleports,
+                &mut dual_activate,
+                &mut dual_deactivate,
+                1,
+            );
+        }
+        if dual_activate && self.partner.is_none() {
+            self.partner = Some(make_partner(&self.player));
+        }
+        if dual_deactivate {
+            self.partner = None;
+        }
+
+        apply_blue_pads_pre_collision(self.level, &mut self.player, &mut self.touched_pads, 0);
+        if let Some(p2) = self.partner.as_mut() {
+            apply_blue_pads_pre_collision(self.level, p2, &mut self.touched_pads, 1);
+        }
+
+        let mut outcome = resolve_collisions(self.level, tick, &mut self.player, 0);
+        if outcome.is_none()
+            && let Some(p2) = self.partner.as_mut()
+        {
+            outcome = resolve_collisions(self.level, tick, p2, 1);
+        }
+
+        if outcome.is_none() {
+            apply_pads(self.level, &mut self.player, &mut self.touched_pads, 0);
+            apply_orbs(
+                self.level,
+                &mut self.player,
+                &mut self.touched_orbs,
+                0,
+                pressed,
+            );
+            if let Some(p2) = self.partner.as_mut() {
+                apply_pads(self.level, p2, &mut self.touched_pads, 1);
+                apply_orbs(self.level, p2, &mut self.touched_orbs, 1, pressed);
+            }
+
+            if end_reached(self.level, old_x, self.player.x) {
+                outcome = Some(SimulationOutcome::Completed {
+                    tick,
+                    time: tick as f32 / 240.0,
+                    state: self.player,
+                });
+            }
+        }
+
+        let frame = make_trace_frame(tick, pressed, self.player, self.partner);
+        self.tick += 1;
+        Ok(LiveStep { frame, outcome })
+    }
 }
 
 fn make_trace_frame(
@@ -565,6 +618,27 @@ mod tests {
 
         assert!((run.trace[0].state.player_speed - crate::consts::PLAYER_SPEED_2X).abs() < 0.0001);
         assert!((run.trace[0].state.speed_multiplier - 5.870002).abs() < 0.0001);
+    }
+
+    #[test]
+    fn live_session_step_tape_matches_offline_trace() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![],
+        };
+        let clicks = ClickTape::from_bits("00111100001111").unwrap();
+        let offline =
+            simulate_with_trace(&level, &clicks, SimulationConfig { max_ticks: 64 }).unwrap();
+        let mut session = LiveSimulationSession::new(&level).unwrap();
+        let mut live_trace = Vec::new();
+
+        for _ in 0..64 {
+            let step = session.step_tape(&clicks).unwrap();
+            live_trace.push(step.frame);
+            assert!(step.outcome.is_none());
+        }
+
+        assert_eq!(offline.trace, live_trace);
     }
 
     #[test]
@@ -3258,6 +3332,52 @@ mod tests {
             (player.slope_exit_vy - expected).abs() < 0.0001,
             "expected slope_exit_vy={expected}, got {}",
             player.slope_exit_vy
+        );
+    }
+
+    #[test]
+    fn ball_uses_cube_slope_exit_velocity() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![LevelObject {
+                object_id: 1338,
+                x: 15.0,
+                y: 105.0,
+                rotation: 0.0,
+                scale: 1.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                groups: Vec::new(),
+                kind: ObjectKind::Slope,
+                hitbox: Some(HitboxData::Slope {
+                    half_extents: [30.0, 15.0],
+                }),
+                raw: HashMap::new(),
+            }],
+        };
+        let mut cube = test_player_state();
+        cube.mode = GameMode::Cube;
+        cube.x = 15.0;
+        cube.y = 130.0;
+        cube.vy = -8.0;
+        cube.on_slope = true;
+        cube.slope_object = Some(0);
+
+        let mut ball = cube;
+        ball.mode = GameMode::Ball;
+
+        let cube_outcome = resolve_collisions(&level, 1, &mut cube, 0);
+        let ball_outcome = resolve_collisions(&level, 1, &mut ball, 0);
+
+        assert!(cube_outcome.is_none());
+        assert!(ball_outcome.is_none());
+        assert_eq!(cube.on_slope, ball.on_slope);
+        assert!((cube.y - ball.y).abs() < 0.001);
+        assert!(
+            (cube.slope_exit_vy - ball.slope_exit_vy).abs() < 0.001,
+            "ball slope carry should match cube: cube={} ball={}",
+            cube.slope_exit_vy,
+            ball.slope_exit_vy
         );
     }
 

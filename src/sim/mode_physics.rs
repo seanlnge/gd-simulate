@@ -359,7 +359,7 @@ fn update_ball(player: &mut PlayerState, pressed: bool, flip_mod: f32) {
         player.is_accelerating = false;
     } else {
         // Ball non-click airborne gravity follows the cube-style branch shape.
-        player.vy += player.gravity * -flip_mod * SUBSTEP_TO_FRAME * VERTICAL_SLOW;
+        player.vy += 0.5 * player.gravity * -flip_mod * SUBSTEP_TO_FRAME * VERTICAL_SLOW;
         if player.gravity_sign < 0.0 {
             player.vy = player.vy.max(-15.0);
         } else {

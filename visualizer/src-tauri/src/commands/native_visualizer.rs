@@ -1,12 +1,12 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use uuid::Uuid;
 
-use crate::contracts::LaunchNativeVisualizerRequest;
+use crate::contracts::{LaunchNativeVisualizerRequest, NativeVisualizerMode};
 
 #[tauri::command]
 pub fn launch_native_visualizer(request: LaunchNativeVisualizerRequest) -> Result<(), String> {
@@ -20,6 +20,7 @@ pub fn launch_native_visualizer(request: LaunchNativeVisualizerRequest) -> Resul
 
     let level_path = temp_dir.join(format!("level-{}.txt", Uuid::new_v4()));
     let clicks_path = temp_dir.join(format!("clicks-{}.txt", Uuid::new_v4()));
+    let mode = request.mode.unwrap_or(NativeVisualizerMode::Replay);
     fs::write(&level_path, request.level_string).map_err(|e| e.to_string())?;
     fs::write(
         &clicks_path,
@@ -27,31 +28,42 @@ pub fn launch_native_visualizer(request: LaunchNativeVisualizerRequest) -> Resul
     )
     .map_err(|e| e.to_string())?;
 
-    if let Some(exe_path) = discover_binary(gd_root) {
-        Command::new(exe_path)
-            .arg("--levelstring-file")
-            .arg(level_path.as_os_str())
-            .arg("--clicks-file")
-            .arg(clicks_path.as_os_str())
-            .arg("--visualize")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    let mut sim_args = vec![
+        "--levelstring-file".to_owned(),
+        level_path.to_string_lossy().into_owned(),
+        "--visualize".to_owned(),
+    ];
+    if mode == NativeVisualizerMode::Play {
+        sim_args.push("--play-live".to_owned());
     } else {
-        Command::new("cargo")
+        sim_args.push("--clicks-file".to_owned());
+        sim_args.push(clicks_path.to_string_lossy().into_owned());
+    }
+
+    if let Some(exe_path) = discover_binary(gd_root) {
+        let mut command = Command::new(exe_path);
+        spawn_detached(&mut command.args(&sim_args))
+            .map_err(|e| format!("failed to launch native gd-real-sim binary: {e}"))?;
+    } else {
+        let mut command = Command::new("cargo");
+        command
             .current_dir(gd_root)
             .arg("run")
             .arg("--bin")
             .arg("gd-real-sim")
-            .arg("--")
-            .arg("--levelstring-file")
-            .arg(level_path.as_os_str())
-            .arg("--clicks-file")
-            .arg(clicks_path.as_os_str())
-            .arg("--visualize")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+            .arg("--");
+        spawn_detached(&mut command.args(&sim_args))
+            .map_err(|e| format!("failed to launch gd-real-sim through cargo: {e}"))?;
     }
     Ok(())
+}
+
+fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
 }
 
 fn discover_binary(gd_root: &Path) -> Option<PathBuf> {

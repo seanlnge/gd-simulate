@@ -72,11 +72,18 @@ export function deleteBitstring(id: string): Promise<void> {
   return invoke("delete_bitstring", { request: { id } });
 }
 
-export function launchNativeVisualizer(levelString: string, clickBitstring?: string | null): Promise<void> {
+export type NativeVisualizerMode = "replay" | "play";
+
+export function launchNativeVisualizer(
+  levelString: string,
+  clickBitstring?: string | null,
+  mode: NativeVisualizerMode = "replay",
+): Promise<void> {
   return invoke("launch_native_visualizer", {
     request: {
       level_string: levelString,
       click_bitstring: clickBitstring ?? null,
+      mode,
     },
   });
 }

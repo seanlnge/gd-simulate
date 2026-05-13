@@ -8,11 +8,11 @@ use gd_real_sim::{
     level::Level,
     object_data::ObjectDatabase,
     save::{decode_level_payload, read_local_levels, select_local_level},
-    sim::{SimulationConfig, simulate_with_trace},
+    sim::{DT, LiveSimulationSession, SimulationConfig, SimulationOutcome, simulate_with_trace},
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "simulate")]
@@ -64,6 +64,9 @@ struct Args {
     /// Open a simple debug window showing path + hitboxes.
     #[arg(long)]
     visualize: bool,
+    /// Run the native visualizer as a live 240 Hz playable session.
+    #[arg(long, requires = "visualize")]
+    play_live: bool,
     /// DEV ONLY: overlay canonical tick log CSV in visualizer.
     #[arg(long, hide = true, requires = "visualize")]
     dev_canon_ticklog_csv: Option<PathBuf>,
@@ -186,6 +189,14 @@ fn main() -> anyhow::Result<()> {
         }
         _ => anyhow::bail!("provide exactly one of --levelstring, --levelstring-file, or --save"),
     };
+    let db = ObjectDatabase::load_embedded()?;
+    let level = Level::parse(levelstring.trim(), &db)?;
+
+    if args.play_live {
+        launch_live_visualizer(&level)?;
+        return Ok(());
+    }
+
     let clicks = match (&args.clicks, &args.clicks_file, &args.clicks_bin) {
         (Some(clicks), None, None) => clicks.clone(),
         (None, Some(path), None) => fs::read_to_string(path)?,
@@ -193,8 +204,6 @@ fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("provide exactly one of --clicks, --clicks-file, or --clicks-bin"),
     };
 
-    let db = ObjectDatabase::load_embedded()?;
-    let level = Level::parse(levelstring.trim(), &db)?;
     let trimmed_clicks = clicks.trim();
     let aligned_clicks = apply_tick_offset(trimmed_clicks, args.start_tick_offset);
     let tape = ClickTape::from_bits(&aligned_clicks)?;
@@ -782,6 +791,228 @@ fn launch_visualizer(
         window.update_with_buffer(&buffer, width, height)?;
         std::thread::sleep(Duration::from_millis(16));
     }
+    Ok(())
+}
+
+fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
+    let width = 1120;
+    let height = 720;
+    let mut window = Window::new(
+        "gd-real-sim live play",
+        width,
+        height,
+        WindowOptions::default(),
+    )?;
+    window.set_target_fps(240);
+
+    eprintln!(
+        "live controls: Space/Up/left mouse = hold, F = toggle follow-cube, \
+         Left/Right or A/D = scroll, +/- or wheel = zoom, right-mouse drag = pan, Esc = close"
+    );
+
+    let mut buffer = vec![BG_COLOR; width * height];
+    let scene = scene_bounds(level, &[], None);
+    let mut state = VizState {
+        scroll_x: scene.min_x,
+        scroll_y: 0.0,
+        zoom: 1.0,
+        show_clicks: true,
+        show_speed: true,
+        show_mode: true,
+        show_vy: true,
+        show_main_hitbox: true,
+        show_rotated_hitbox: false,
+        show_core_hitbox: false,
+        show_trail: true,
+        show_canon_trace: false,
+        has_canon_trace: false,
+        show_settings_panel: false,
+        follow_cube: true,
+        current_tick: 0,
+        scrubbing: false,
+        last_mouse_down: false,
+        pan_anchor: None,
+        last_rmouse_down: false,
+    };
+
+    let mut session = LiveSimulationSession::new(level)?;
+    let mut trace = Vec::new();
+    let mut last_frame_at = Instant::now();
+    let mut accumulator = Duration::ZERO;
+    let tick_dt = Duration::from_secs_f32(DT);
+    let mut restart_at: Option<Instant> = None;
+    let mut stopped_outcome: Option<SimulationOutcome> = None;
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        let now = Instant::now();
+        accumulator += now.saturating_duration_since(last_frame_at);
+        last_frame_at = now;
+
+        if let Some(when) = restart_at
+            && now >= when
+        {
+            session = LiveSimulationSession::new(level)?;
+            trace.clear();
+            state.current_tick = 0;
+            accumulator = Duration::ZERO;
+            restart_at = None;
+            stopped_outcome = None;
+        }
+
+        if window.is_key_down(Key::Left) || window.is_key_down(Key::A) {
+            state.scroll_x -= SCROLL_STEP_WORLD / state.zoom;
+            state.follow_cube = false;
+        }
+        if window.is_key_down(Key::Right) || window.is_key_down(Key::D) {
+            state.scroll_x += SCROLL_STEP_WORLD / state.zoom;
+            state.follow_cube = false;
+        }
+        for key in window.get_keys_pressed(KeyRepeat::No) {
+            match key {
+                Key::F => state.follow_cube = !state.follow_cube,
+                Key::Equal | Key::NumPadPlus => {
+                    state.zoom = (state.zoom * ZOOM_STEP).min(ZOOM_MAX);
+                }
+                Key::Minus | Key::NumPadMinus => {
+                    state.zoom = (state.zoom / ZOOM_STEP).max(ZOOM_MIN);
+                }
+                _ => {}
+            }
+        }
+        if let Some((_, dy)) = window.get_scroll_wheel() {
+            if dy > 0.0 {
+                state.zoom = (state.zoom * ZOOM_STEP).min(ZOOM_MAX);
+            } else if dy < 0.0 {
+                state.zoom = (state.zoom / ZOOM_STEP).max(ZOOM_MIN);
+            }
+        }
+
+        let rmouse_down = window.get_mouse_down(MouseButton::Right);
+        let mouse_pos = window.get_mouse_pos(MouseMode::Discard);
+        let layout = compute_layout(
+            height,
+            state.show_clicks,
+            state.show_speed,
+            state.show_mode,
+            state.show_vy,
+        );
+        if let Some((mx, my)) = mouse_pos {
+            let scale_now = base_scale(height, &layout) * state.zoom;
+            if rmouse_down && !state.last_rmouse_down {
+                state.pan_anchor = Some((mx, my, state.scroll_x, state.scroll_y));
+                state.follow_cube = false;
+            } else if rmouse_down
+                && let Some((anchor_mx, anchor_my, start_sx, start_sy)) = state.pan_anchor
+            {
+                let dx_world = (mx - anchor_mx) / scale_now;
+                let dy_world = (my - anchor_my) / scale_now;
+                state.scroll_x = start_sx - dx_world;
+                state.scroll_y = start_sy + dy_world;
+            }
+            if !rmouse_down {
+                state.pan_anchor = None;
+            }
+        }
+        state.last_rmouse_down = rmouse_down;
+
+        if stopped_outcome.is_none() {
+            let mut steps_this_frame = 0;
+            while accumulator >= tick_dt && steps_this_frame < 8 {
+                let held = window.get_mouse_down(MouseButton::Left)
+                    || window.is_key_down(Key::Space)
+                    || window.is_key_down(Key::Up);
+                let step = session.step_live(held)?;
+                let outcome = step.outcome.clone();
+                trace.push(step.frame);
+                state.current_tick = trace.len().saturating_sub(1);
+                accumulator = accumulator.saturating_sub(tick_dt);
+                steps_this_frame += 1;
+
+                if let Some(outcome) = outcome {
+                    if matches!(outcome, SimulationOutcome::Died { .. }) {
+                        restart_at = Some(Instant::now() + Duration::from_secs(1));
+                    }
+                    stopped_outcome = Some(outcome);
+                    break;
+                }
+            }
+        }
+
+        let layout = compute_layout(
+            height,
+            state.show_clicks,
+            state.show_speed,
+            state.show_mode,
+            state.show_vy,
+        );
+
+        if state.follow_cube
+            && let Some(frame) = trace.get(state.current_tick)
+        {
+            let span = (width as f32 - 48.0) / (base_scale(height, &layout) * state.zoom);
+            state.scroll_x = frame.state.x - span * 0.35;
+        }
+
+        let viewport = build_viewport(
+            &scene,
+            width,
+            height,
+            &layout,
+            state.scroll_x,
+            state.scroll_y,
+            state.zoom,
+        );
+        state.scroll_x = clamp_scroll_x(&scene, &viewport, state.scroll_x);
+        let viewport = build_viewport(
+            &scene,
+            width,
+            height,
+            &layout,
+            state.scroll_x,
+            state.scroll_y,
+            state.zoom,
+        );
+
+        render_scene(&mut buffer, &viewport, level, &trace, None, &state);
+        if state.show_clicks {
+            draw_press_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+        }
+        if state.show_speed {
+            draw_speed_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+        }
+        if state.show_mode {
+            draw_mode_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+        }
+        if state.show_vy {
+            draw_vy_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+        }
+        draw_scrubber_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+
+        let status = match &stopped_outcome {
+            Some(SimulationOutcome::Died { .. }) => "dead - restarting",
+            Some(SimulationOutcome::Completed { .. }) => "complete",
+            Some(SimulationOutcome::Timeout { .. }) => "timeout",
+            None => {
+                if window.get_mouse_down(MouseButton::Left)
+                    || window.is_key_down(Key::Space)
+                    || window.is_key_down(Key::Up)
+                {
+                    "holding"
+                } else {
+                    "released"
+                }
+            }
+        };
+        window.set_title(&format!(
+            "gd-real-sim live | tick {} | {} | follow:{}",
+            session.tick(),
+            status,
+            on_off(state.follow_cube)
+        ));
+
+        window.update_with_buffer(&buffer, width, height)?;
+    }
+
     Ok(())
 }
 

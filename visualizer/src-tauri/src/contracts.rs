@@ -111,6 +111,14 @@ pub struct DeleteBitstringRequest {
 pub struct LaunchNativeVisualizerRequest {
     pub level_string: String,
     pub click_bitstring: Option<String>,
+    pub mode: Option<NativeVisualizerMode>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeVisualizerMode {
+    Replay,
+    Play,
 }
 
 #[derive(Debug, Clone, Deserialize)]

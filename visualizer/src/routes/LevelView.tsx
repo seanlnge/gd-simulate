@@ -26,7 +26,7 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [bitstrings, setBitstrings] = useState<BitstringEntry[]>([]);
-  const [launchingNative, setLaunchingNative] = useState(false);
+  const [launchingNative, setLaunchingNative] = useState<"replay" | "play" | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showAllHitboxes, setShowAllHitboxes] = useState(true);
@@ -89,21 +89,23 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
     };
   }, [level.id, level.levelString, level.source]);
 
-  const runRender = async () => {
+  const launchVisualizer = async (mode: "replay" | "play") => {
     if (!resolvedLevelString) {
       setLaunchError("Level payload has not loaded yet.");
       return;
     }
-    setLaunchingNative(true);
+    setLaunchingNative(mode);
     setLaunchError(null);
     try {
-      // Launches the exact native main.rs minifb visualizer. Press Esc there
-      // to close and return focus to this Tauri preview.
-      await launchNativeVisualizer(resolvedLevelString, attachedBitstring?.bitstring ?? null);
+      await launchNativeVisualizer(
+        resolvedLevelString,
+        mode === "replay" ? (attachedBitstring?.bitstring ?? null) : null,
+        mode,
+      );
     } catch (error) {
       setLaunchError(String(error));
     } finally {
-      setLaunchingNative(false);
+      setLaunchingNative(null);
     }
   };
 
@@ -171,9 +173,9 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
         <Card className="rounded-none border-slate-900 bg-[#09152c]">
           <CardContent className="flex items-center justify-between p-4">
             <div className="space-y-1 text-sm text-slate-300">
-              <p>Render opens the exact `gd-real-sim/src/main.rs` minifb visualizer.</p>
+              <p>Replay opens the native visualizer with the selected bitstring. Play opens a live 240 Hz session.</p>
               <p className="text-xs text-slate-400">
-                Press Esc in the native window to close it and return here. Press Esc here to open/close settings.
+                Live controls: Space / Up / left mouse = hold. Death restarts after 1 second. Esc closes native window.
               </p>
               {previewLoading ? <p className="text-xs text-amber-300">Loading full level payload...</p> : null}
               {previewError ? <p className="text-xs text-red-300">{previewError}</p> : null}
@@ -184,9 +186,20 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
                 <Settings className="mr-2 size-4" />
                 Settings (Esc)
               </Button>
-              <Button onClick={() => void runRender()} disabled={previewLoading || launchingNative || !resolvedLevelString}>
+              <Button
+                onClick={() => void launchVisualizer("replay")}
+                disabled={previewLoading || launchingNative != null || !resolvedLevelString}
+                variant="outline"
+              >
                 <Tv className="mr-2 size-4" />
-                {launchingNative ? "Launching..." : "Render"}
+                {launchingNative === "replay" ? "Launching..." : "Replay Bitstring"}
+              </Button>
+              <Button
+                onClick={() => void launchVisualizer("play")}
+                disabled={previewLoading || launchingNative != null || !resolvedLevelString}
+              >
+                <Play className="mr-2 size-4" />
+                {launchingNative === "play" ? "Launching..." : "Play Level"}
               </Button>
             </div>
           </CardContent>
@@ -196,7 +209,7 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
       <Card className="h-full rounded-none border-slate-900 bg-[#0a1328]">
         <CardHeader className="pb-3">
           <CardTitle className="text-base text-slate-100">Bitstrings</CardTitle>
-          <p className="text-xs text-slate-400">Choose before hitting Render.</p>
+          <p className="text-xs text-slate-400">Choose before replaying, or press Play Level for live input.</p>
         </CardHeader>
         <CardContent className="h-[calc(100%-88px)] p-0">
           <ScrollArea className="h-full px-3 pb-3">
@@ -263,8 +276,12 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
               </p>
             </div>
             <div className="mt-4 flex gap-2">
-              <Button className="flex-1" onClick={() => void runRender()} disabled={launchingNative || !resolvedLevelString}>
-                Launch Native
+              <Button
+                className="flex-1"
+                onClick={() => void launchVisualizer("play")}
+                disabled={launchingNative != null || !resolvedLevelString}
+              >
+                Play Level
               </Button>
               <Button variant="outline" className="flex-1" onClick={() => setSettingsOpen(false)}>
                 Close

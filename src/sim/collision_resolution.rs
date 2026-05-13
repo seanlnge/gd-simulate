@@ -327,7 +327,7 @@ fn resolve_collisions(
             //                    * slopeYVelocity
             //                    * flipMod
             //                    * (playerUphill ? -1 : 1);
-            //   if (flying || ball) m_slopeVelocity *= 0.75;
+            //   if (flying) m_slopeVelocity *= 0.75;
             //
             // GDP itself only applies `m_slopeVelocity` on a *jump* from
             // (or just-after) a slope (`addToYVelocity(m_slopeVelocity*0.25, 60)`
@@ -361,10 +361,7 @@ fn resolve_collisions(
                             / rect_width)
                         * flip_mod
                         * slope_dir;
-                    if matches!(
-                        player.mode,
-                        GameMode::Ship | GameMode::Ufo | GameMode::Wave | GameMode::Ball
-                    ) {
+                    if matches!(player.mode, GameMode::Ship | GameMode::Ufo | GameMode::Wave) {
                         slope_velocity *= 0.75;
                     }
                     slope_velocity

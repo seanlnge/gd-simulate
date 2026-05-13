@@ -76,7 +76,7 @@ fn ball_window_bounds(level: &Level, player: &PlayerState) -> Option<(f32, f32)>
         .max_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))?;
     // Ball portal corridor: 8 blocks tall (240u), centered around the
     // highest 30u interval at the portal's Y.
-    let f = (portal.y / WORLD_UNITS_PER_BLOCK).floor() * WORLD_UNITS_PER_BLOCK;
+    let f = ((portal.y / WORLD_UNITS_PER_BLOCK).floor() * WORLD_UNITS_PER_BLOCK).max(210.0);
     Some((f - 120.0, f + 120.0))
 }
 
