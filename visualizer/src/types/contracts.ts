@@ -98,6 +98,16 @@ export interface BitstringEntry {
   linked_level_id?: string | null;
 }
 
+export interface LiveAttemptEntry {
+  id: string;
+  created_at_ms: number;
+  outcome: string;
+  percent: number;
+  processed_clicks: number;
+  bitstring: string;
+  tick: number;
+}
+
 export interface ViewerLevelSelection {
   source: "local" | "official";
   id: string;

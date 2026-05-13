@@ -7,6 +7,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::contracts::{LaunchNativeVisualizerRequest, NativeVisualizerMode};
+use crate::commands::attempts::attempt_history_path_for_level_id;
 
 #[tauri::command]
 pub fn launch_native_visualizer(request: LaunchNativeVisualizerRequest) -> Result<(), String> {
@@ -35,6 +36,11 @@ pub fn launch_native_visualizer(request: LaunchNativeVisualizerRequest) -> Resul
     ];
     if mode == NativeVisualizerMode::Play {
         sim_args.push("--play-live".to_owned());
+        if let Some(level_id) = request.level_id.as_deref() {
+            let attempt_history = attempt_history_path_for_level_id(level_id)?;
+            sim_args.push("--live-attempt-history".to_owned());
+            sim_args.push(attempt_history.to_string_lossy().into_owned());
+        }
     } else {
         sim_args.push("--clicks-file".to_owned());
         sim_args.push(clicks_path.to_string_lossy().into_owned());

@@ -108,10 +108,27 @@ pub struct DeleteBitstringRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ListLiveAttemptsRequest {
+    pub level_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveAttemptEntry {
+    pub id: String,
+    pub created_at_ms: u64,
+    pub outcome: String,
+    pub percent: f32,
+    pub processed_clicks: usize,
+    pub bitstring: String,
+    pub tick: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct LaunchNativeVisualizerRequest {
     pub level_string: String,
     pub click_bitstring: Option<String>,
     pub mode: Option<NativeVisualizerMode>,
+    pub level_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

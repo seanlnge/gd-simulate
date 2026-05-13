@@ -503,7 +503,7 @@ fn cube_starts_on_real_floor_baseline_without_sinking() {
     .unwrap();
 
     let first = run.trace.first().unwrap();
-    assert!((first.state.x - -13.70175).abs() < 0.001);
+    assert!((first.state.x - -1.0).abs() < 0.001);
     assert_eq!(first.state.y, 105.0);
     assert!(first.state.on_ground);
     assert_eq!(first.state.vy, 0.0);

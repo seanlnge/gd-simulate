@@ -179,28 +179,11 @@ fn gravity_pad_can_activate(gravity_sign: f32, rotation_deg: f32, scale_y: f32) 
 
 fn intersects_pad_activation(object: &LevelObject, player: PlayerState) -> bool {
     let player_half = player.player_half();
-    // Rotated yellow pads in centered-world levels line up with their actual
-    // transformed object box better than the legacy OpenGD activation offset.
-    // Keep OpenGD activation rectangles for all other pad cases.
-    if object.object_id == 35 {
-        let theta = object.rotation.to_radians();
-        if theta.sin().abs() >= 1e-4
-            && let Some(rect) = object_rect(object)
-        {
-            return intersects_pad_player(rect, player, player_half, object.rotation);
-        }
-    }
-    // In this centered-world model, purple/red pad activation should follow
-    // their transformed object hitboxes. Using legacy OpenGD activation boxes
-    // (tall and vertically shifted) causes visibly-early triggers before the
-    // player's displayed hitboxes touch the pad.
-    if matches!(object.object_id, 140 | 1332)
-        && let Some(rect) = object_rect(object)
-    {
-        return intersects_pad_player(rect, player, player_half, object.rotation);
-    }
-    if let Some(rect) = opengd_pad_activation_rect(object) {
-        return intersects_pad_player(rect, player, player_half, object.rotation);
+    // Pad activation follows the same transformed object hitbox drawn by the
+    // visualizer. Do not use the old tall legacy activation rectangles here:
+    // they visibly trigger pads before player and pad hitboxes touch.
+    if let Some(transform) = opengd_box_transform(object) {
+        return intersects_oriented_quad_player(transform.corners, player, player_half);
     }
     let Some(rect) = object_rect(object) else {
         return false;
@@ -233,78 +216,5 @@ fn intersects_pad_player(rect: Rect, player: PlayerState, player_half: f32, obje
         return dx * dx + dy * dy <= radius * radius;
     }
     intersects_box_player(rect, player, player_half)
-}
-
-fn opengd_pad_activation_rect(object: &LevelObject) -> Option<Rect> {
-    // OpenGD LongData.cpp `_pHitboxes` entries for pad outer bounds. These
-    // activation boxes are taller and offset upward relative to gdclone's
-    // compact visual/collision boxes, which is why Pop's rotated red pads were
-    // missed despite the player intersecting the real pad activation zone.
-    let (w, h, ox, oy) = match object.object_id {
-        35 => (4.0, 25.0, -12.5, -2.0),
-        // In our centered world-space model, keep OpenGD-derived heights while
-        // aligning X around object center to avoid premature left-shifted
-        // activation before the player reaches the visible pad.
-        67 => (6.0, 25.0, -3.0, -3.0),
-        140 => (5.0, 25.0, -2.5, -2.5),
-        1332 => (7.0, 29.0, -3.5, -3.5),
-        _ => return None,
-    };
-    // Activation bounds are authored in the pad's local/object space.
-    // Rotate + signed-scale them into world space, then return the world AABB.
-    // (OpenGD uses transformed outer pad zones; an axis-aligned local box
-    // misses rotated pads like the early 90deg blue pad in Opti Nerfdate.)
-    let corners = [
-        slope_local_to_world_point(
-            object.x,
-            object.y,
-            object.rotation,
-            object.scale_x,
-            object.scale_y,
-            ox,
-            oy,
-        ),
-        slope_local_to_world_point(
-            object.x,
-            object.y,
-            object.rotation,
-            object.scale_x,
-            object.scale_y,
-            ox + w,
-            oy,
-        ),
-        slope_local_to_world_point(
-            object.x,
-            object.y,
-            object.rotation,
-            object.scale_x,
-            object.scale_y,
-            ox + w,
-            oy + h,
-        ),
-        slope_local_to_world_point(
-            object.x,
-            object.y,
-            object.rotation,
-            object.scale_x,
-            object.scale_y,
-            ox,
-            oy + h,
-        ),
-    ];
-    let mut min_x = f32::INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-    for (x, y) in corners {
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
-    Some(Rect {
-        center: [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5],
-        half_extents: [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
-    })
 }
 

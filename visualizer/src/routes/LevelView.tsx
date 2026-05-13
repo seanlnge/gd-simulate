@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowLeft, Binary, Disc3, Gauge, Play, Settings, Skull, Tv } from "lucide-react";
+import { ArrowLeft, Binary, Disc3, Gauge, Play, Save, Settings, Skull, Tv } from "lucide-react";
 import {
   decodeClicksBinBlob,
   downloadOfficialLevel,
   launchNativeVisualizer,
   listBitstrings,
+  listLiveAttempts,
   upsertBitstring,
 } from "@/api/tauri";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { BitstringEntry, ViewerLevelSelection } from "../types/contracts";
+import type { BitstringEntry, LiveAttemptEntry, ViewerLevelSelection } from "../types/contracts";
 
 interface LevelViewProps {
   level: ViewerLevelSelection;
@@ -29,6 +30,9 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
   const [launchingNative, setLaunchingNative] = useState<"replay" | "play" | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [liveAttempts, setLiveAttempts] = useState<LiveAttemptEntry[]>([]);
+  const [attemptError, setAttemptError] = useState<string | null>(null);
+  const [savingAttemptId, setSavingAttemptId] = useState<string | null>(null);
   const [showAllHitboxes, setShowAllHitboxes] = useState(true);
   const [showTrace, setShowTrace] = useState(true);
   const [showPlayer, setShowPlayer] = useState(true);
@@ -37,6 +41,32 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
   useEffect(() => {
     void listBitstrings().then(setBitstrings).catch(() => setBitstrings([]));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshAttempts() {
+      try {
+        const attempts = await listLiveAttempts(level.id);
+        if (!cancelled) {
+          setLiveAttempts(attempts);
+          setAttemptError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLiveAttempts([]);
+          setAttemptError(String(error));
+        }
+      }
+    }
+
+    void refreshAttempts();
+    const intervalId = window.setInterval(() => void refreshAttempts(), 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [level.id]);
 
   async function importBitstringBin(file: File) {
     try {
@@ -101,11 +131,32 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
         resolvedLevelString,
         mode === "replay" ? (attachedBitstring?.bitstring ?? null) : null,
         mode,
+        mode === "play" ? level.id : null,
       );
     } catch (error) {
       setLaunchError(String(error));
     } finally {
       setLaunchingNative(null);
+    }
+  };
+
+  const saveAttemptBitstring = async (attempt: LiveAttemptEntry) => {
+    setSavingAttemptId(attempt.id);
+    setLaunchError(null);
+    try {
+      const saved = await upsertBitstring({
+        name: `${level.name} live ${formatAttemptTime(attempt.created_at_ms)}`,
+        bitstring: attempt.bitstring,
+        source_kind: "live_attempt",
+        linked_level_id: level.id,
+        notes: `${attempt.percent.toFixed(2)}%, ${attempt.processed_clicks} processed clicks, ${attempt.outcome}`,
+      });
+      setBitstrings(await listBitstrings());
+      onAttachBitstring(saved);
+    } catch (error) {
+      setLaunchError(`Failed saving live attempt: ${String(error)}`);
+    } finally {
+      setSavingAttemptId(null);
     }
   };
 
@@ -175,7 +226,7 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
             <div className="space-y-1 text-sm text-slate-300">
               <p>Replay opens the native visualizer with the selected bitstring. Play opens a live 240 Hz session.</p>
               <p className="text-xs text-slate-400">
-                Live controls: Space / Up / left mouse = hold. Death restarts after 1 second. Esc closes native window.
+                Live controls: Space / Up / left mouse = hold. Esc opens settings; Esc again or Exit closes.
               </p>
               {previewLoading ? <p className="text-xs text-amber-300">Loading full level payload...</p> : null}
               {previewError ? <p className="text-xs text-red-300">{previewError}</p> : null}
@@ -206,61 +257,106 @@ export function LevelView({ level, attachedBitstring, onAttachBitstring, onBack 
         </Card>
       </div>
 
-      <Card className="h-full rounded-none border-slate-900 bg-[#0a1328]">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base text-slate-100">Bitstrings</CardTitle>
-          <p className="text-xs text-slate-400">Choose before replaying, or press Play Level for live input.</p>
-        </CardHeader>
-        <CardContent className="h-[calc(100%-88px)] p-0">
-          <ScrollArea className="h-full px-3 pb-3">
-            <div className="space-y-2">
-              <label
-                className="block cursor-pointer rounded-sm border border-dashed border-slate-700 bg-[#111a33] px-3 py-2 text-xs text-slate-300"
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const file = event.dataTransfer.files[0];
-                  if (file) void importBitstringBin(file);
-                }}
-              >
-                Drop `.bin` here or click to import bitstring
-                <input
-                  type="file"
-                  accept=".bin"
-                  className="hidden"
-                  onChange={(event) => {
-                    const file = event.currentTarget.files?.[0];
+      <div className="flex h-full min-h-0 flex-col gap-3">
+        <Card className="min-h-[250px] rounded-none border-slate-900 bg-[#0a1328]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base text-slate-100">Last 20 Live Attempts</CardTitle>
+            <p className="text-xs text-slate-400">Attempts update while the native live window is running.</p>
+            {attemptError ? <p className="text-xs text-red-300">{attemptError}</p> : null}
+          </CardHeader>
+          <CardContent className="h-[170px] p-0">
+            <ScrollArea className="h-full px-3 pb-3">
+              <div className="space-y-2">
+                {liveAttempts.length === 0 ? (
+                  <p className="rounded-sm border border-slate-800 bg-[#141e38] px-3 py-2 text-xs text-slate-400">
+                    No live attempts recorded yet.
+                  </p>
+                ) : null}
+                {liveAttempts.map((attempt) => (
+                  <div key={attempt.id} className="rounded-sm border border-slate-800 bg-[#141e38] px-3 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-100">
+                          {attempt.percent.toFixed(2)}% | {attempt.outcome}
+                        </p>
+                        <p className="text-xs text-slate-400">
+                          {attempt.processed_clicks} clicks processed | tick {attempt.tick}
+                        </p>
+                        <p className="truncate text-xs text-slate-500">{formatAttemptTime(attempt.created_at_ms)}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={savingAttemptId != null || attempt.bitstring.length === 0}
+                        onClick={() => void saveAttemptBitstring(attempt)}
+                      >
+                        <Save className="mr-1.5 size-3.5" />
+                        {savingAttemptId === attempt.id ? "Saving" : "Save"}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card className="min-h-0 flex-1 rounded-none border-slate-900 bg-[#0a1328]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base text-slate-100">Bitstrings</CardTitle>
+            <p className="text-xs text-slate-400">Choose before replaying, or save a live attempt above.</p>
+          </CardHeader>
+          <CardContent className="h-[calc(100%-88px)] p-0">
+            <ScrollArea className="h-full px-3 pb-3">
+              <div className="space-y-2">
+                <label
+                  className="block cursor-pointer rounded-sm border border-dashed border-slate-700 bg-[#111a33] px-3 py-2 text-xs text-slate-300"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const file = event.dataTransfer.files[0];
                     if (file) void importBitstringBin(file);
-                    event.currentTarget.value = "";
                   }}
-                />
-              </label>
-              <button
-                type="button"
-                className={`w-full rounded-sm border border-slate-800 px-3 py-2 text-left text-sm text-slate-200 transition ${
-                  attachedBitstring == null ? "bg-[#1b294c]" : "bg-[#141e38] hover:bg-[#1b294c]"
-                }`}
-                onClick={() => onAttachBitstring(null)}
-              >
-                No bitstring
-              </button>
-              {bitstrings.map((entry) => (
+                >
+                  Drop `.bin` here or click to import bitstring
+                  <input
+                    type="file"
+                    accept=".bin"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      if (file) void importBitstringBin(file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
                 <button
-                  key={entry.id}
                   type="button"
                   className={`w-full rounded-sm border border-slate-800 px-3 py-2 text-left text-sm text-slate-200 transition ${
-                    attachedBitstring?.id === entry.id ? "bg-[#1b294c]" : "bg-[#141e38] hover:bg-[#1b294c]"
+                    attachedBitstring == null ? "bg-[#1b294c]" : "bg-[#141e38] hover:bg-[#1b294c]"
                   }`}
-                  onClick={() => onAttachBitstring(entry)}
+                  onClick={() => onAttachBitstring(null)}
                 >
-                  <p className="font-medium">{entry.name}</p>
-                  <p className="text-xs text-slate-400">{entry.bitstring.length} ticks</p>
+                  No bitstring
                 </button>
-              ))}
-            </div>
-          </ScrollArea>
-        </CardContent>
-      </Card>
+                {bitstrings.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className={`w-full rounded-sm border border-slate-800 px-3 py-2 text-left text-sm text-slate-200 transition ${
+                      attachedBitstring?.id === entry.id ? "bg-[#1b294c]" : "bg-[#141e38] hover:bg-[#1b294c]"
+                    }`}
+                    onClick={() => onAttachBitstring(entry)}
+                  >
+                    <p className="font-medium">{entry.name}</p>
+                    <p className="text-xs text-slate-400">{entry.bitstring.length} ticks</p>
+                  </button>
+                ))}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      </div>
 
       {settingsOpen ? (
         <div className="absolute inset-0 flex justify-end bg-black/45">
@@ -309,6 +405,13 @@ function ToggleControl({
       {label}
     </label>
   );
+}
+
+function formatAttemptTime(createdAtMs: number): string {
+  if (!Number.isFinite(createdAtMs) || createdAtMs <= 0) {
+    return "Unknown time";
+  }
+  return new Date(createdAtMs).toLocaleString();
 }
 
 function MetaItem({ label, value, icon }: { label: string; value: string; icon?: ReactNode }) {

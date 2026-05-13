@@ -2,6 +2,7 @@ mod commands;
 mod contracts;
 
 use commands::{
+    attempts::list_live_attempts,
     bitstrings::{delete_bitstring, list_bitstrings, upsert_bitstring},
     local_levels::{list_local_levels, parse_local_levels_blob},
     native_visualizer::launch_native_visualizer,
@@ -26,6 +27,7 @@ pub fn run() {
             search_official_levels,
             download_official_level,
             launch_native_visualizer,
+            list_live_attempts,
             list_bitstrings,
             upsert_bitstring,
             delete_bitstring

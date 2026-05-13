@@ -33,6 +33,7 @@ pub const TIME_TO_FRAMES: f32 = 60.0;
 const SUBSTEP_TO_FRAME: f32 = DT * TIME_TO_FRAMES;
 /// gdclone's vertical `slowed_delta = delta_seconds * 0.9` scaling.
 pub const VERTICAL_SLOW: f32 = 0.9;
+const FIRST_TRACE_X: f32 = -1.0;
 const GROUND_PROBE_HEIGHT: f32 = 0.1;
 const GROUND_PROBE_DISTANCE: f32 = 0.0;
 const WORLD_UNITS_PER_BLOCK: f32 = 30.0;
@@ -186,7 +187,6 @@ pub struct LiveSimulationSession<'a> {
     teleport_exits: Vec<&'a LevelObject>,
     tick: usize,
     click_tick: usize,
-    click_pattern_started: bool,
 }
 
 fn starting_mode_from_header(level: &Level) -> GameMode {
@@ -258,8 +258,10 @@ impl<'a> LiveSimulationSession<'a> {
 
         let starting_player_speed = starting_player_speed_from_header(level);
         let speed_profile = SpeedProfile::for_player_speed(starting_player_speed);
+        let first_step_dx =
+            speed_profile.speed_multiplier * DT * TIME_TO_FRAMES * starting_player_speed;
         let player = PlayerState {
-            x: -15.0,
+            x: FIRST_TRACE_X - first_step_dx,
             y: 105.0,
             vx: speed_profile.speed_multiplier,
             vy: 0.0,
@@ -309,7 +311,6 @@ impl<'a> LiveSimulationSession<'a> {
             teleport_exits,
             tick: 0,
             click_tick: 0,
-            click_pattern_started: false,
         })
     }
 
@@ -322,33 +323,13 @@ impl<'a> LiveSimulationSession<'a> {
     }
 
     pub fn step_live(&mut self, held: bool) -> SimResult<LiveStep> {
-        let pressed = if self.start_input_this_tick() {
-            self.click_pattern_started = true;
-            held
-        } else {
-            false
-        };
-        self.step_resolved(pressed)
+        self.step_resolved(held)
     }
 
     pub fn step_tape(&mut self, clicks: &ClickTape) -> SimResult<LiveStep> {
-        let pressed = if self.start_input_this_tick() {
-            self.click_pattern_started = true;
-            let pressed = clicks.is_pressed(self.click_tick);
-            self.click_tick += 1;
-            pressed
-        } else {
-            false
-        };
+        let pressed = clicks.is_pressed(self.click_tick);
+        self.click_tick += 1;
         self.step_resolved(pressed)
-    }
-
-    fn start_input_this_tick(&self) -> bool {
-        if self.click_pattern_started {
-            return true;
-        }
-        let step_dx = self.player.vx * DT * TIME_TO_FRAMES * self.player.player_speed;
-        self.player.x >= 0.0 || self.player.x + step_dx >= 0.0
     }
 
     fn step_resolved(&mut self, pressed: bool) -> SimResult<LiveStep> {
@@ -639,6 +620,22 @@ mod tests {
         }
 
         assert_eq!(offline.trace, live_trace);
+    }
+
+    #[test]
+    fn click_tape_starts_on_first_attempt_tick_at_recording_start_x() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![],
+        };
+        let clicks = ClickTape::from_bits("1").unwrap();
+        let run = simulate_with_trace(&level, &clicks, SimulationConfig { max_ticks: 1 }).unwrap();
+
+        assert!(run.trace[0].pressed);
+        assert!(
+            (run.trace[0].state.x - FIRST_TRACE_X).abs() < 0.001,
+            "first trace frame should align with bitstring recorder sample 0"
+        );
     }
 
     #[test]
@@ -1862,10 +1859,10 @@ mod tests {
         player.mini = true;
         player.on_ground = false;
         player.gravity_sign = -1.0;
-        // Construct a case that intersects with the mini cube's non-rotated
-        // outer box but not with a small circular proxy.
+        // Construct a case where the mini cube's non-rotated outer box
+        // actually overlaps the blue pad's transformed visible hitbox.
         player.x = 15.9;
-        player.y = 44.4;
+        player.y = 38.9;
 
         apply_pads(&level, &mut player, &mut touched, 0);
         assert_eq!(
@@ -1918,37 +1915,6 @@ mod tests {
     }
 
     #[test]
-    fn purple_pad_activation_rect_is_centered_in_world_space_model() {
-        let mut pad = test_blue_pad(0.0);
-        pad.object_id = 140;
-        pad.x = 100.0;
-        pad.y = 50.0;
-
-        let rect =
-            opengd_pad_activation_rect(&pad).expect("purple pad should have activation rect");
-        assert!(
-            (rect.center[0] - 100.0).abs() < 0.001,
-            "purple pad activation should be centered at pad x; got {}",
-            rect.center[0]
-        );
-    }
-
-    #[test]
-    fn red_pad_activation_rect_is_centered_in_world_space_model() {
-        let mut pad = test_blue_pad(0.0);
-        pad.object_id = 1332;
-        pad.x = 240.0;
-        pad.y = 80.0;
-
-        let rect = opengd_pad_activation_rect(&pad).expect("red pad should have activation rect");
-        assert!(
-            (rect.center[0] - 240.0).abs() < 0.001,
-            "red pad activation should be centered at pad x; got {}",
-            rect.center[0]
-        );
-    }
-
-    #[test]
     fn purple_pad_does_not_activate_while_player_is_still_above_visual_hitbox() {
         // Regression from live pop_ticks/object dump:
         // purple pad is at x=645,y=242 and old activation triggered around
@@ -1980,6 +1946,115 @@ mod tests {
             !intersects_pad_activation(&pad, player),
             "purple pad should not activate before player hitboxes overlap visual pad hitbox"
         );
+    }
+
+    #[test]
+    fn flipped_ball_does_not_activate_rotated_pad_from_rotated_aabb_corner() {
+        let pad = LevelObject {
+            object_id: 140,
+            x: 100.0,
+            y: 100.0,
+            rotation: 45.0,
+            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            groups: Vec::new(),
+            kind: ObjectKind::Pad,
+            hitbox: Some(HitboxData::Box {
+                offset: [0.0, 0.0],
+                half_extents: [12.5, 2.5],
+            }),
+            raw: HashMap::new(),
+        };
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.gravity_sign = 1.0;
+        player.on_ground = false;
+        // This overlaps the rotated pad's expanded AABB corner, but not the
+        // actual rotated pad quad. Ball should use its normal 30x30 hitbox
+        // against the pad's rotated hitbox, not AABB-vs-AABB.
+        player.x = 125.0;
+        player.y = 125.0;
+
+        assert!(
+            !intersects_pad_activation(&pad, player),
+            "flipped ball should not activate rotated pad from the pad AABB corner"
+        );
+    }
+
+    #[test]
+    fn ball_pad_activation_requires_visible_pad_hitbox_overlap() {
+        let pad = LevelObject {
+            object_id: 67,
+            x: 100.0,
+            y: 100.0,
+            rotation: 0.0,
+            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            groups: Vec::new(),
+            kind: ObjectKind::Pad,
+            hitbox: Some(HitboxData::Box {
+                offset: [0.0, 0.0],
+                half_extents: [12.5, 3.0],
+            }),
+            raw: HashMap::new(),
+        };
+        let mut player = test_player_state();
+        player.mode = GameMode::Ball;
+        player.gravity_sign = 1.0;
+        player.on_ground = false;
+        player.x = 100.0;
+        // The old gravity-pad activation volume reaches upward to y=122, but
+        // the visible pad hitbox only reaches y=103. The ball bottom is 0.1u
+        // above the visible pad, so activation here is visibly early.
+        player.y = 118.1;
+
+        assert!(
+            !intersects_pad_activation(&pad, player),
+            "ball should not activate a pad until its normal hitbox overlaps the visible pad hitbox"
+        );
+    }
+
+    #[test]
+    fn all_pad_ids_require_visible_hitbox_overlap_not_legacy_activation_zone() {
+        let pad_specs = [
+            (35, [12.5, 2.0]),
+            (67, [12.5, 3.0]),
+            (140, [12.5, 2.5]),
+            (1332, [14.5, 3.5]),
+        ];
+
+        for (object_id, half_extents) in pad_specs {
+            let pad = LevelObject {
+                object_id,
+                x: 100.0,
+                y: 100.0,
+                rotation: 0.0,
+                scale: 1.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                groups: Vec::new(),
+                kind: ObjectKind::Pad,
+                hitbox: Some(HitboxData::Box {
+                    offset: [0.0, 0.0],
+                    half_extents,
+                }),
+                raw: HashMap::new(),
+            };
+            let mut player = test_player_state();
+            player.mode = GameMode::Cube;
+            player.on_ground = false;
+            player.x = 100.0;
+            // Place the player's bottom just above the visible pad, while
+            // still inside the old 25px+ legacy activation rectangles.
+            player.y = 100.0 + half_extents[1] + player.player_half() + 0.1;
+
+            assert!(
+                !intersects_pad_activation(&pad, player),
+                "pad id {object_id} should not activate from legacy-only overlap"
+            );
+        }
     }
 
     #[test]

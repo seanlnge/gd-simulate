@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BitstringEntry,
   LocalLevelEntry,
+  LiveAttemptEntry,
   OfficialLevelDownload,
   OfficialLevelSearchItem,
   ParsedLevelResponse,
@@ -57,6 +58,10 @@ export function listBitstrings(): Promise<BitstringEntry[]> {
   return invoke("list_bitstrings");
 }
 
+export function listLiveAttempts(levelId: string): Promise<LiveAttemptEntry[]> {
+  return invoke("list_live_attempts", { request: { level_id: levelId } });
+}
+
 export function upsertBitstring(payload: {
   id?: string;
   name: string;
@@ -78,12 +83,14 @@ export function launchNativeVisualizer(
   levelString: string,
   clickBitstring?: string | null,
   mode: NativeVisualizerMode = "replay",
+  levelId?: string | null,
 ): Promise<void> {
   return invoke("launch_native_visualizer", {
     request: {
       level_string: levelString,
       click_bitstring: clickBitstring ?? null,
       mode,
+      level_id: levelId ?? null,
     },
   });
 }

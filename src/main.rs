@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 use clap::{Parser, ValueEnum};
 use flate2::{Compression, write::GzEncoder};
@@ -11,8 +14,9 @@ use gd_real_sim::{
     sim::{DT, LiveSimulationSession, SimulationConfig, SimulationOutcome, simulate_with_trace},
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use serde::Serialize;
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(name = "simulate")]
@@ -67,6 +71,9 @@ struct Args {
     /// Run the native visualizer as a live 240 Hz playable session.
     #[arg(long, requires = "visualize")]
     play_live: bool,
+    /// JSONL file where live play attempts should be appended.
+    #[arg(long, requires = "play_live")]
+    live_attempt_history: Option<PathBuf>,
     /// DEV ONLY: overlay canonical tick log CSV in visualizer.
     #[arg(long, hide = true, requires = "visualize")]
     dev_canon_ticklog_csv: Option<PathBuf>,
@@ -193,7 +200,7 @@ fn main() -> anyhow::Result<()> {
     let level = Level::parse(levelstring.trim(), &db)?;
 
     if args.play_live {
-        launch_live_visualizer(&level)?;
+        launch_live_visualizer(&level, args.live_attempt_history.as_deref())?;
         return Ok(());
     }
 
@@ -253,6 +260,17 @@ struct CanonTracePoint {
     tick: usize,
     x: f32,
     y: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LiveAttemptRecord {
+    id: String,
+    created_at_ms: u64,
+    outcome: String,
+    percent: f32,
+    processed_clicks: usize,
+    bitstring: String,
+    tick: usize,
 }
 
 fn read_canon_ticklog_csv(path: &PathBuf) -> anyhow::Result<Vec<CanonTracePoint>> {
@@ -358,6 +376,95 @@ fn apply_tick_offset(clicks: &str, offset: i32) -> String {
         shifted.push_str(clicks);
         shifted
     }
+}
+
+fn live_attempt_bitstring(trace: &[gd_real_sim::sim::TraceFrame]) -> String {
+    trace
+        .iter()
+        .map(|frame| if frame.pressed { '1' } else { '0' })
+        .collect()
+}
+
+fn level_progress_percent(level: &Level, x: f32) -> f32 {
+    let Some(finish_x) = visualizer_finish_x(level) else {
+        return 0.0;
+    };
+    if finish_x <= 0.0 {
+        return if x >= finish_x { 100.0 } else { 0.0 };
+    }
+    ((x.max(0.0) / finish_x) * 100.0).clamp(0.0, 100.0)
+}
+
+fn visualizer_finish_x(level: &Level) -> Option<f32> {
+    if let Some(finish_portal_x) = level
+        .objects
+        .iter()
+        .filter(|object| object.object_id == 3607)
+        .map(|object| object.x)
+        .min_by(|a, b| a.total_cmp(b))
+    {
+        return Some(finish_portal_x);
+    }
+
+    level
+        .objects
+        .iter()
+        .filter(|object| {
+            matches!(
+                object.kind,
+                gd_real_sim::level::ObjectKind::Solid
+                    | gd_real_sim::level::ObjectKind::Slope
+                    | gd_real_sim::level::ObjectKind::Hazard
+            )
+        })
+        .map(|object| object.x)
+        .max_by(|a, b| a.total_cmp(b))
+        .map(|last_block_x| last_block_x + 60.0)
+}
+
+fn live_attempt_record(
+    level: &Level,
+    trace: &[gd_real_sim::sim::TraceFrame],
+    outcome: &SimulationOutcome,
+    attempt_index: u64,
+) -> LiveAttemptRecord {
+    let bitstring = live_attempt_bitstring(trace);
+    let created_at_ms = current_time_ms();
+    let (outcome_label, tick, x) = outcome_summary(outcome);
+    LiveAttemptRecord {
+        id: format!("{created_at_ms}-{attempt_index}"),
+        created_at_ms,
+        outcome: outcome_label.to_owned(),
+        percent: level_progress_percent(level, x),
+        processed_clicks: bitstring.len(),
+        bitstring,
+        tick,
+    }
+}
+
+fn outcome_summary(outcome: &SimulationOutcome) -> (&'static str, usize, f32) {
+    match outcome {
+        SimulationOutcome::Completed { tick, state, .. } => ("completed", *tick, state.x),
+        SimulationOutcome::Died { tick, state, .. } => ("died", *tick, state.x),
+        SimulationOutcome::Timeout { tick, state, .. } => ("timeout", *tick, state.x),
+    }
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn append_live_attempt(path: &Path, record: &LiveAttemptRecord) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, record)?;
+    writeln!(file)?;
+    Ok(())
 }
 
 const BG_COLOR: u32 = 0x101018;
@@ -674,37 +781,9 @@ fn launch_visualizer(
                     state.show_settings_panel = !state.show_settings_panel;
                     consumed_left_click = true;
                 } else if state.show_settings_panel
-                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my, &state)
+                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my, &state, false)
                 {
-                    match toggle {
-                        SettingsToggle::MainHitbox => {
-                            state.show_main_hitbox = !state.show_main_hitbox;
-                        }
-                        SettingsToggle::RotatedHitbox => {
-                            state.show_rotated_hitbox = !state.show_rotated_hitbox;
-                        }
-                        SettingsToggle::CoreHitbox => {
-                            state.show_core_hitbox = !state.show_core_hitbox;
-                        }
-                        SettingsToggle::Trail => {
-                            state.show_trail = !state.show_trail;
-                        }
-                        SettingsToggle::ClickBar => {
-                            state.show_clicks = !state.show_clicks;
-                        }
-                        SettingsToggle::VelocityBar => {
-                            state.show_vy = !state.show_vy;
-                        }
-                        SettingsToggle::SpeedBar => {
-                            state.show_speed = !state.show_speed;
-                        }
-                        SettingsToggle::ModeBar => {
-                            state.show_mode = !state.show_mode;
-                        }
-                        SettingsToggle::CanonTrace => {
-                            state.show_canon_trace = !state.show_canon_trace;
-                        }
-                    }
+                    let _ = apply_settings_toggle(&mut state, toggle);
                     consumed_left_click = true;
                 }
             }
@@ -778,7 +857,7 @@ fn launch_visualizer(
             draw_vy_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
         }
         draw_scrubber_bar(&mut buffer, &viewport, &layout, trace, state.current_tick);
-        draw_settings_ui(&mut buffer, width, height, &state);
+        draw_settings_ui(&mut buffer, width, height, &state, false);
 
         window.set_title(&format!(
             "gd-real-sim | tick {}/{} | zoom {:.2}x | follow:{}",
@@ -794,7 +873,7 @@ fn launch_visualizer(
     Ok(())
 }
 
-fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
+fn launch_live_visualizer(level: &Level, attempt_history: Option<&Path>) -> anyhow::Result<()> {
     let width = 1120;
     let height = 720;
     let mut window = Window::new(
@@ -807,13 +886,16 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
 
     eprintln!(
         "live controls: Space/Up/left mouse = hold, F = toggle follow-cube, \
-         Left/Right or A/D = scroll, +/- or wheel = zoom, right-mouse drag = pan, Esc = close"
+         Left/Right or A/D = scroll, +/- or wheel = zoom, right-mouse drag = pan, \
+         Esc = settings, Esc in settings = close"
     );
 
     let mut buffer = vec![BG_COLOR; width * height];
-    let scene = scene_bounds(level, &[], None);
+    let mut scene = scene_bounds(level, &[], None);
+    scene.min_x = scene.min_x.min(0.0);
+    scene.max_x = scene.max_x.max(0.0);
     let mut state = VizState {
-        scroll_x: scene.min_x,
+        scroll_x: 0.0,
         scroll_y: 0.0,
         zoom: 1.0,
         show_clicks: true,
@@ -842,8 +924,9 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
     let tick_dt = Duration::from_secs_f32(DT);
     let mut restart_at: Option<Instant> = None;
     let mut stopped_outcome: Option<SimulationOutcome> = None;
+    let mut attempt_index = 0_u64;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    'live: while window.is_open() {
         let now = Instant::now();
         accumulator += now.saturating_duration_since(last_frame_at);
         last_frame_at = now;
@@ -870,6 +953,12 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
         for key in window.get_keys_pressed(KeyRepeat::No) {
             match key {
                 Key::F => state.follow_cube = !state.follow_cube,
+                Key::Escape => {
+                    if state.show_settings_panel {
+                        break 'live;
+                    }
+                    state.show_settings_panel = true;
+                }
                 Key::Equal | Key::NumPadPlus => {
                     state.zoom = (state.zoom * ZOOM_STEP).min(ZOOM_MAX);
                 }
@@ -887,6 +976,7 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
             }
         }
 
+        let mouse_down = window.get_mouse_down(MouseButton::Left);
         let rmouse_down = window.get_mouse_down(MouseButton::Right);
         let mouse_pos = window.get_mouse_pos(MouseMode::Discard);
         let layout = compute_layout(
@@ -915,12 +1005,31 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
         }
         state.last_rmouse_down = rmouse_down;
 
+        let mut consumed_left_click = false;
+        if let Some((mx, my)) = mouse_pos {
+            if mouse_down && !state.last_mouse_down {
+                if point_in_rect(mx, my, settings_button_rect(width)) {
+                    state.show_settings_panel = !state.show_settings_panel;
+                    consumed_left_click = true;
+                } else if state.show_settings_panel
+                    && let Some(toggle) = settings_panel_toggle_at(width, mx, my, &state, true)
+                {
+                    if apply_settings_toggle(&mut state, toggle) {
+                        break 'live;
+                    }
+                    consumed_left_click = true;
+                }
+            }
+        }
+        state.last_mouse_down = mouse_down;
+
         if stopped_outcome.is_none() {
             let mut steps_this_frame = 0;
             while accumulator >= tick_dt && steps_this_frame < 8 {
-                let held = window.get_mouse_down(MouseButton::Left)
-                    || window.is_key_down(Key::Space)
-                    || window.is_key_down(Key::Up);
+                let held = !state.show_settings_panel
+                    && ((mouse_down && !consumed_left_click)
+                        || window.is_key_down(Key::Space)
+                        || window.is_key_down(Key::Up));
                 let step = session.step_live(held)?;
                 let outcome = step.outcome.clone();
                 trace.push(step.frame);
@@ -929,6 +1038,13 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
                 steps_this_frame += 1;
 
                 if let Some(outcome) = outcome {
+                    if let Some(path) = attempt_history {
+                        let record = live_attempt_record(level, &trace, &outcome, attempt_index);
+                        attempt_index = attempt_index.saturating_add(1);
+                        if let Err(error) = append_live_attempt(path, &record) {
+                            eprintln!("failed to write live attempt history: {error}");
+                        }
+                    }
                     if matches!(outcome, SimulationOutcome::Died { .. }) {
                         restart_at = Some(Instant::now() + Duration::from_secs(1));
                     }
@@ -987,15 +1103,15 @@ fn launch_live_visualizer(level: &Level) -> anyhow::Result<()> {
             draw_vy_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
         }
         draw_scrubber_bar(&mut buffer, &viewport, &layout, &trace, state.current_tick);
+        draw_settings_ui(&mut buffer, width, height, &state, true);
 
         let status = match &stopped_outcome {
             Some(SimulationOutcome::Died { .. }) => "dead - restarting",
             Some(SimulationOutcome::Completed { .. }) => "complete",
             Some(SimulationOutcome::Timeout { .. }) => "timeout",
             None => {
-                if window.get_mouse_down(MouseButton::Left)
-                    || window.is_key_down(Key::Space)
-                    || window.is_key_down(Key::Up)
+                if !state.show_settings_panel
+                    && (mouse_down || window.is_key_down(Key::Space) || window.is_key_down(Key::Up))
                 {
                     "holding"
                 } else {
@@ -1703,6 +1819,7 @@ enum SettingsToggle {
     SpeedBar,
     ModeBar,
     CanonTrace,
+    Exit,
 }
 
 struct SettingsRow {
@@ -1710,7 +1827,13 @@ struct SettingsRow {
     on: bool,
 }
 
-fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &VizState) {
+fn draw_settings_ui(
+    buffer: &mut [u32],
+    width: usize,
+    _height: usize,
+    state: &VizState,
+    include_exit: bool,
+) {
     let (bx, by, bw, bh) = settings_button_rect(width);
     fill_rect(buffer, width, bx, by, bw, bh, SETTINGS_BTN_BG_OFF);
     draw_glyph_border(buffer, width, bx, by, bw, SETTINGS_BTN_BORDER);
@@ -1718,7 +1841,7 @@ fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &Vi
     if !state.show_settings_panel {
         return;
     }
-    let rows = settings_rows(state);
+    let rows = settings_rows(state, include_exit);
     let (px, py, pw, ph) = settings_panel_rect(width, rows.len());
     fill_rect(buffer, width, px, py, pw, ph, SETTINGS_PANEL_BG);
     draw_rect_border(buffer, width, px, py, pw, ph, SETTINGS_BTN_BORDER);
@@ -1767,7 +1890,7 @@ fn draw_settings_ui(buffer: &mut [u32], width: usize, _height: usize, state: &Vi
     }
 }
 
-fn settings_rows(state: &VizState) -> Vec<(SettingsToggle, SettingsRow)> {
+fn settings_rows(state: &VizState, include_exit: bool) -> Vec<(SettingsToggle, SettingsRow)> {
     let mut rows = vec![
         (
             SettingsToggle::MainHitbox,
@@ -1835,6 +1958,15 @@ fn settings_rows(state: &VizState) -> Vec<(SettingsToggle, SettingsRow)> {
             },
         ));
     }
+    if include_exit {
+        rows.push((
+            SettingsToggle::Exit,
+            SettingsRow {
+                glyph: 'X',
+                on: false,
+            },
+        ));
+    }
     rows
 }
 
@@ -1859,8 +1991,9 @@ fn settings_panel_toggle_at(
     mx: f32,
     my: f32,
     state: &VizState,
+    include_exit: bool,
 ) -> Option<SettingsToggle> {
-    let rows = settings_rows(state);
+    let rows = settings_rows(state, include_exit);
     let (px, py, pw, ph) = settings_panel_rect(width, rows.len());
     if !point_in_rect(mx, my, (px, py, pw, ph)) {
         return None;
@@ -1879,6 +2012,40 @@ fn settings_panel_toggle_at(
         }
     }
     None
+}
+
+fn apply_settings_toggle(state: &mut VizState, toggle: SettingsToggle) -> bool {
+    match toggle {
+        SettingsToggle::MainHitbox => {
+            state.show_main_hitbox = !state.show_main_hitbox;
+        }
+        SettingsToggle::RotatedHitbox => {
+            state.show_rotated_hitbox = !state.show_rotated_hitbox;
+        }
+        SettingsToggle::CoreHitbox => {
+            state.show_core_hitbox = !state.show_core_hitbox;
+        }
+        SettingsToggle::Trail => {
+            state.show_trail = !state.show_trail;
+        }
+        SettingsToggle::ClickBar => {
+            state.show_clicks = !state.show_clicks;
+        }
+        SettingsToggle::VelocityBar => {
+            state.show_vy = !state.show_vy;
+        }
+        SettingsToggle::SpeedBar => {
+            state.show_speed = !state.show_speed;
+        }
+        SettingsToggle::ModeBar => {
+            state.show_mode = !state.show_mode;
+        }
+        SettingsToggle::CanonTrace => {
+            state.show_canon_trace = !state.show_canon_trace;
+        }
+        SettingsToggle::Exit => return true,
+    }
+    false
 }
 
 fn point_in_rect(mx: f32, my: f32, rect: (i32, i32, i32, i32)) -> bool {
@@ -1956,6 +2123,10 @@ fn draw_toggle_glyph(buffer: &mut [u32], width: usize, x: i32, y: i32, glyph: ch
             draw_v_line(buffer, width, x, y, y + 10, color);
             draw_v_line(buffer, width, x + 8, y, y + 10, color);
             stroke_segment(buffer, width, x, y, x + 8, y + 10, color);
+        }
+        'X' => {
+            stroke_segment(buffer, width, x, y, x + 8, y + 10, color);
+            stroke_segment(buffer, width, x + 8, y, x, y + 10, color);
         }
         '1' => {
             draw_v_line(buffer, width, x + 4, y, y + 10, color);
@@ -2337,7 +2508,17 @@ fn player_half(mini: bool) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_tick_offset, resample_click_bits_linear};
+    use std::collections::HashMap;
+
+    use gd_real_sim::{
+        level::{Level, LevelObject, ObjectKind},
+        sim::{GameMode, PlayerState, TraceFrame},
+    };
+
+    use super::{
+        apply_tick_offset, level_progress_percent, live_attempt_bitstring,
+        resample_click_bits_linear,
+    };
 
     #[test]
     fn apply_tick_offset_positive_trims_front() {
@@ -2361,5 +2542,91 @@ mod tests {
     fn resample_click_bits_linear_handles_empty() {
         let out = resample_click_bits_linear(&[], 60, 240);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn live_attempt_bitstring_preserves_full_attempt_timing() {
+        let trace = vec![
+            frame_at(-8.0, true),
+            frame_at(-0.5, true),
+            frame_at(0.2, true),
+            frame_at(6.0, false),
+            frame_at(12.0, true),
+        ];
+
+        assert_eq!(live_attempt_bitstring(&trace), "11101");
+    }
+
+    #[test]
+    fn level_progress_percent_uses_finish_portal_when_present() {
+        let level = Level {
+            header: HashMap::new(),
+            objects: vec![
+                object(1, ObjectKind::Solid, 180.0),
+                object(3607, ObjectKind::Trigger, 360.0),
+            ],
+        };
+
+        assert_eq!(level_progress_percent(&level, -15.0), 0.0);
+        assert!((level_progress_percent(&level, 180.0) - 50.0).abs() < 0.001);
+        assert_eq!(level_progress_percent(&level, 500.0), 100.0);
+    }
+
+    fn frame_at(x: f32, pressed: bool) -> TraceFrame {
+        TraceFrame {
+            tick: 0,
+            time: 0.0,
+            pressed,
+            state: PlayerState {
+                x,
+                y: 105.0,
+                vx: 0.0,
+                vy: 0.0,
+                mode: GameMode::Cube,
+                gravity_sign: -1.0,
+                mini: false,
+                player_speed: 0.9,
+                speed_multiplier: 5.77,
+                gravity: 0.9582,
+                y_start: 11.18,
+                vehicle_size: 1.0,
+                on_ground: true,
+                was_jump_buffered: false,
+                jump_buffered: false,
+                state_ring_jump: false,
+                on_slope: false,
+                slope_exit_vy: 0.0,
+                slope_exit_vx: 0.0,
+                slope_contact_cooldown: 0,
+                slope_object: None,
+                slope_is_current_top: false,
+                slope_prev_radius: 15.0,
+                rotation: 0.0,
+                is_accelerating: false,
+                snapped_object: None,
+                snap_distance: 0.0,
+                dash_rotation_blocks_remaining: 0.0,
+                dash_angle_deg: 0.0,
+                hold_ticks: 0,
+                pending_yvel_next_tick: 0.0,
+            },
+            partner: None,
+        }
+    }
+
+    fn object(object_id: u32, kind: ObjectKind, x: f32) -> LevelObject {
+        LevelObject {
+            object_id,
+            x,
+            y: 90.0,
+            rotation: 0.0,
+            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            groups: Vec::new(),
+            kind,
+            hitbox: None,
+            raw: HashMap::new(),
+        }
     }
 }
